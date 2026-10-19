@@ -18,6 +18,20 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly IUiServices _ui;
     private readonly IEditService _edits;
     private readonly HashSet<string> _writeGranted = new(StringComparer.OrdinalIgnoreCase);
+    private (PlanViewModel Plan, PlanStepViewModel Step)? _pendingStep;
+
+    [ObservableProperty] private bool _planMode;
+
+    private async void OnStepRequested(object? sender, (PlanViewModel Plan, PlanStepViewModel Step) e)
+    {
+        if (IsGenerating) { ErrorMessage = "Wait for the current reply to finish before running a step."; return; }
+        ErrorMessage = null;
+        e.Step.Status = PlanStepStatus.Running;
+        _pendingStep = e;
+        InputText = e.Plan.BuildStepPrompt(e.Step);
+        PlanMode = false;
+        await SendAsync();
+    }
     private readonly ILogger<MainViewModel> _log;
 
     private Conversation _current = new();
@@ -231,6 +245,9 @@ public sealed partial class MainViewModel : ObservableObject
         var text = InputText.Trim();
         if (text.Length == 0) return;
         var model = SelectedModel ?? _settings.Current.Model;
+        var planMode = PlanMode;
+        var stepCtx = _pendingStep;
+        _pendingStep = null;
 
         ErrorMessage = null;
         InputText = string.Empty;
@@ -255,12 +272,24 @@ public sealed partial class MainViewModel : ObservableObject
         try
         {
             await foreach (var chunk in _agent.RespondAsync(_current, model, ct,
-                files => assistantVm.ContextNote = files.Count == 0 ? "Project context: overview only" : "Project context: " + string.Join(", ", files)))
-                assistantVm.Append(chunk);
-            if (assistantModel.Content.Length == 0)
-                ErrorMessage = "The model returned an empty response.";
-            else if (!ct.IsCancellationRequested) await ProposeEditsAsync(assistantVm, assistantModel.Content);
-        }
+                files => assistantVm.ContextNote = files.Count == 0 ? "Project context: overview only" : "Project context: " + string.Join(", ", files),
+                                planMode))
+                                assistantVm.Append(chunk);
+                            if (assistantModel.Content.Length == 0)
+                                ErrorMessage = "The model returned an empty response.";
+                            else if (!ct.IsCancellationRequested)
+                            {
+                                if (planMode) AttachPlan(assistantVm, assistantModel.Content);
+                                else
+                                {
+                                    await ProposeEditsAsync(assistantVm, assistantModel.Content);
+                                    if (stepCtx is { } s && s.Step.Status == PlanStepStatus.Running
+                                        && assistantVm.Changes.Count > 0 && !assistantVm.HasProblems
+                                        && assistantVm.Changes.All(c => c.State == ChangeState.Applied))
+                                        s.Step.Status = PlanStepStatus.Done;
+                                }
+                            }
+                        }
         catch (OperationCanceledException) { /* user pressed Stop; keep partial output */ }
         catch (ModelException ex)
         {
@@ -286,6 +315,20 @@ public sealed partial class MainViewModel : ObservableObject
             IsGenerating = false;
             OnPropertyChanged(nameof(HasMessages));
         }
+    }
+
+    private void AttachPlan(MessageViewModel vm, string content)
+    {
+        var parsed = PlanParser.Parse(content);
+        if (parsed is null)
+        {
+            vm.Problems = "No step list was found in that reply, so no plan was created. Try asking again.";
+            return;
+        }
+        var plan = new PlanViewModel(parsed);
+        plan.StepRequested += OnStepRequested;
+        vm.Plan = plan;
+        PlanMode = false;
     }
 
     private async Task ProposeEditsAsync(MessageViewModel vm, string content)

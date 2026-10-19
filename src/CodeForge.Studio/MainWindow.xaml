@@ -252,6 +252,9 @@
                         <CheckBox Content="{Binding Project.Title}" ContentStringFormat="Use project context: {0}" IsChecked="{Binding Project.ContextEnabled}"
                                   IsEnabled="{Binding Project.HasProject}" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center"
                                   Margin="0,0,14,0" MaxWidth="260" ToolTip="Send relevant excerpts from the open project with each question"/>
+                        <CheckBox Content="📋 Plan first" IsChecked="{Binding PlanMode}" Foreground="{StaticResource TextBrush}"
+                                  VerticalAlignment="Center" Margin="0,0,14,0"
+                                  ToolTip="Next question: get a step-by-step plan first, then run the steps one at a time"/>
                         <TextBlock Text="Model:" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/>
                         <ComboBox Width="210" ItemsSource="{Binding Models}" SelectedItem="{Binding SelectedModel}"
                                   IsEnabled="{Binding CanEditConversations}" ToolTip="Installed Ollama models"/>
@@ -285,6 +288,48 @@
                                         <TextBlock Text="{Binding Problems}" FontSize="11" Foreground="{StaticResource WarnBrush}"
                                                    TextWrapping="Wrap" Margin="0,6,0,0"
                                                    Visibility="{Binding HasProblems, Converter={StaticResource BoolToVis}}"/>
+                                        <Border Visibility="{Binding HasPlan, Converter={StaticResource BoolToVis}}"
+                                                Background="{StaticResource CodeBgBrush}" BorderBrush="{StaticResource AccentBrush}"
+                                                BorderThickness="1" CornerRadius="6" Margin="0,6,0,4" Padding="10">
+                                            <StackPanel DataContext="{Binding Plan}">
+                                                <DockPanel>
+                                                    <TextBlock Text="{Binding Progress}" DockPanel.Dock="Right" FontSize="11"
+                                                               Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+                                                    <TextBlock Text="{Binding Title, StringFormat=📋 Plan: {0}}" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource TextBrush}" TextTrimming="CharacterEllipsis"/>
+                                                </DockPanel>
+                                                <ItemsControl ItemsSource="{Binding Steps}" Margin="0,6,0,6">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate DataType="{x:Type vm:PlanStepViewModel}">
+                                                            <Grid Margin="0,2">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="22"/>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="Auto"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <TextBlock Text="{Binding Icon}" Foreground="{StaticResource AccentBrush}"/>
+                                                                <TextBlock Grid.Column="1" TextWrapping="Wrap" Foreground="{StaticResource TextBrush}">
+                                                                    <Run Text="{Binding Number, Mode=OneWay}"/><Run Text=". "/><Run Text="{Binding Text, Mode=OneWay}"/>
+                                                                </TextBlock>
+                                                                <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="8,0,0,0">
+                                                                    <Button Content="Run" Padding="6,1" Margin="0,0,4,0" IsEnabled="{Binding CanRun}"
+                                                                            Command="{Binding DataContext.RunStepCommand, RelativeSource={RelativeSource AncestorType=ItemsControl, AncestorLevel=1}}"
+                                                                            CommandParameter="{Binding}"/>
+                                                                    <Button Content="Done" Padding="6,1" Margin="0,0,4,0" IsEnabled="{Binding CanDone}"
+                                                                            Command="{Binding DataContext.MarkDoneCommand, RelativeSource={RelativeSource AncestorType=ItemsControl, AncestorLevel=1}}"
+                                                                            CommandParameter="{Binding}"/>
+                                                                    <Button Content="Skip" Padding="6,1" IsEnabled="{Binding CanSkip}"
+                                                                            Command="{Binding DataContext.SkipCommand, RelativeSource={RelativeSource AncestorType=ItemsControl, AncestorLevel=1}}"
+                                                                            CommandParameter="{Binding}"/>
+                                                                </StackPanel>
+                                                            </Grid>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                                <Button Content="▶ Run next step" Style="{StaticResource AccentButton}" Command="{Binding RunNextCommand}"
+                                                        HorizontalAlignment="Left" Padding="10,4"/>
+                                            </StackPanel>
+                                        </Border>
                                         <ItemsControl ItemsSource="{Binding Changes}" Margin="0,6,0,0">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate DataType="{x:Type vm:ChangeViewModel}">

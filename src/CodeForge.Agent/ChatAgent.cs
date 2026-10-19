@@ -33,13 +33,20 @@ public sealed class ChatAgent
         "Rules: SEARCH must match the existing file exactly and be unique; use an empty SEARCH only to create a new file; " +
         "never delete or rename files; never edit secret or binary files. These are proposals the user must approve.";
 
+    public const string PlanInstructions =
+        "The user wants a plan first, not code. Do not write code and do not use edit blocks. " +
+        "Reply with a short plan in exactly this format:\nPLAN: <short title>\n1. <step>\n2. <step>\n3. <step>\n" +
+        "Use 3 to 8 small, concrete steps that can each be done and verified on their own, and name the files involved. " +
+        "You may add one short sentence of notes after the list.";
+
     public static IReadOnlyList<ModelChatMessage> BuildPrompt(
-        string systemPrompt, IEnumerable<ChatMessage> history, string? projectContext = null)
+        string systemPrompt, IEnumerable<ChatMessage> history, string? projectContext = null, bool planMode = false)
     {
         var list = new List<ModelChatMessage>();
         var system = systemPrompt ?? "";
         if (!string.IsNullOrWhiteSpace(projectContext))
-            system = system + "\n\n" + UntrustedNotice + "\n<project_context>\n" + projectContext + "\n</project_context>\n\n" + EditInstructions;
+            system = system + "\n\n" + UntrustedNotice + "\n<project_context>\n" + projectContext + "\n</project_context>";
+        system += "\n\n" + (planMode ? PlanInstructions : !string.IsNullOrWhiteSpace(projectContext) ? EditInstructions : "");
         if (!string.IsNullOrWhiteSpace(system))
             list.Add(new("system", system.Trim()));
         var recent = history
@@ -52,7 +59,7 @@ public sealed class ChatAgent
 
     public async IAsyncEnumerable<string> RespondAsync(
         Conversation conversation, string model, [EnumeratorCancellation] CancellationToken ct,
-        Action<IReadOnlyList<string>>? onContext = null)
+        Action<IReadOnlyList<string>>? onContext = null, bool planMode = false)
     {
         string? context = null;
         if (_projects is not null)
@@ -67,7 +74,7 @@ public sealed class ChatAgent
                 onContext?.Invoke(built.Files);
             }
         }
-        var prompt = BuildPrompt(_settings.Current.SystemPrompt, conversation.Messages, context);
+        var prompt = BuildPrompt(_settings.Current.SystemPrompt, conversation.Messages, context, planMode);
         await foreach (var chunk in _client.StreamChatAsync(model, prompt, ct).WithCancellation(ct))
             yield return chunk;
     }

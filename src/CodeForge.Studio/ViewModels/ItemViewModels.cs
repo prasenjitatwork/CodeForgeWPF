@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using CodeForge.Agent;
 using CodeForge.Application;
 using CodeForge.Domain;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -89,6 +90,64 @@ public sealed partial class ChangeViewModel : ObservableObject
     }
 }
 
+public sealed partial class PlanStepViewModel : ObservableObject
+{
+    public int Number { get; }
+    public string Text { get; }
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(Icon), nameof(CanRun), nameof(CanDone), nameof(CanSkip))]
+    private PlanStepStatus _status = PlanStepStatus.Pending;
+
+    public string Icon => Status switch
+    {
+        PlanStepStatus.Done => "✓", PlanStepStatus.Running => "▶", PlanStepStatus.Skipped => "⏭", _ => "○"
+    };
+    public bool CanRun => Status != PlanStepStatus.Done;
+    public bool CanDone => Status is PlanStepStatus.Pending or PlanStepStatus.Running;
+    public bool CanSkip => Status is PlanStepStatus.Pending or PlanStepStatus.Running;
+
+    public PlanStepViewModel(int number, string text) { Number = number; Text = text; }
+}
+
+public sealed partial class PlanViewModel : ObservableObject
+{
+    public string Title { get; }
+    public List<PlanStepViewModel> Steps { get; }
+    public event EventHandler<(PlanViewModel Plan, PlanStepViewModel Step)>? StepRequested;
+
+    public PlanViewModel(ParsedPlan plan)
+    {
+        Title = plan.Title;
+        Steps = plan.Steps.Select((s, i) => new PlanStepViewModel(i + 1, s)).ToList();
+        foreach (var s in Steps) s.PropertyChanged += (_, _) => OnPropertyChanged(nameof(Progress));
+    }
+
+    public string Progress
+    {
+        get
+        {
+            var done = Steps.Count(s => s.Status == PlanStepStatus.Done);
+            var skipped = Steps.Count(s => s.Status == PlanStepStatus.Skipped);
+            return $"{done}/{Steps.Count} done" + (skipped > 0 ? $", {skipped} skipped" : "");
+        }
+    }
+
+    public string BuildStepPrompt(PlanStepViewModel step) =>
+        PlanParser.StepPrompt(Title, Steps.Select(s => (s.Text, s.Status)).ToList(), Steps.IndexOf(step));
+
+    [RelayCommand] private void RunStep(PlanStepViewModel? step) { if (step is { CanRun: true }) StepRequested?.Invoke(this, (this, step)); }
+    [RelayCommand] private void MarkDone(PlanStepViewModel? step) { if (step is { CanDone: true }) step.Status = PlanStepStatus.Done; }
+    [RelayCommand] private void Skip(PlanStepViewModel? step) { if (step is { CanSkip: true }) step.Status = PlanStepStatus.Skipped; }
+
+    [RelayCommand]
+    private void RunNext()
+    {
+        var next = Steps.FirstOrDefault(s => s.Status == PlanStepStatus.Running) ?? Steps.FirstOrDefault(s => s.Status == PlanStepStatus.Pending);
+        if (next is not null) StepRequested?.Invoke(this, (this, next));
+    }
+}
+
 public sealed partial class MessageViewModel : ObservableObject
 {
     public ChatMessage Model { get; }
@@ -103,6 +162,8 @@ public sealed partial class MessageViewModel : ObservableObject
     [ObservableProperty] [NotifyPropertyChangedFor(nameof(HasProblems))] private string? _problems;
     public bool HasProblems => !string.IsNullOrEmpty(Problems);
     public bool HasChanges => Changes.Count > 0;
+    [ObservableProperty] [NotifyPropertyChangedFor(nameof(HasPlan))] private PlanViewModel? _plan;
+    public bool HasPlan => Plan is not null;
     public void RaiseChangesChanged() => OnPropertyChanged(nameof(HasChanges));
 
     public MessageViewModel(ChatMessage model)

@@ -10,10 +10,19 @@
 | 1 | WPF chat connected to Ollama | **Completed** |
 | 2 | Project selection, file reading, search, code understanding (read-only) | **Completed** |
 | 3 | Proposed code edits, diffs, approval | **Completed** |
-| 4 | Build and test runner, error feedback to the AI | **Completed — Waiting for User Approval of Phase 5** |
-| 5–6 | Planning, memory | Not Started |
+| 4 | Build and test runner, error feedback to the AI | **Completed** |
+| 5 | Planning mode (plan first, run steps one at a time) | **Completed — Waiting for User Approval of Phase 6** |
+| 6 | Memory | Not Started |
 
-**Exact next action:** Ask the user whether to proceed to Phase 5. **User approval is required** — do not start Phase 5 without it.
+**Exact next action:** Ask the user whether to proceed to Phase 6. **User approval is required** — do not start Phase 6 without it.
+
+## Phase 5 — completed features (no new write/shell powers)
+- Header checkbox **📋 Plan first**: the next question asks the model for a plan only (`PLAN: title` + 3–8 numbered steps, no code). `PlanParser` extracts it (tolerates markdown, bullets, sub-items; max 12 steps, 300 chars each) and a **plan card** appears under the reply: status icons (○ pending, ▶ running, ✓ done, ⏭ skipped), progress "n/m done", per-step **Run / Done / Skip**, and **▶ Run next step**.
+- Running a step sends a focused prompt (that step only, plan state included) through the normal chat and edit flow, so folder write permission and diffs work exactly as in Phase 3. If all its changes apply cleanly the step is auto-marked Done; otherwise it stays Running for manual Done/Skip/Retry.
+- Steps never run automatically in bulk; one at a time, not while a reply is generating. Plan mode turns itself off after the plan is made.
+- Files: `CodeForge.Agent\PlanParser.cs`, `ChatAgent.cs` (planMode), `Studio\ViewModels\ItemViewModels.cs` (PlanViewModel/PlanStepViewModel), `MainViewModel.cs`, `MainWindow.xaml`, `tests\PlanTests.cs`.
+- Live smoke (exe via UI Automation, real `qwen2.5-coder:7b`): Plan first → plan card with 4 steps; Run next step → folder permission dialog → `a.txt` created on disk, step ✓, "1/4 done". Steps 2–4, Skip/Done buttons were not clicked live.
+- Limitations: plans are in-memory only (lost on restart; persistence belongs to Phase 6); a 7B model may split steps too finely or ignore the format (then "no plan" message shown).
 
 ## Phase 4 — completed features (fixed commands only)
 - **Project tab → "🔨 Build & Test"** expander: **Build**, **Test**, **■ Stop**, **Ask AI to fix**, status line, live output box.
@@ -55,7 +64,8 @@
 
 ## Build and tests (actually executed)
 - `dotnet build CodeForgeStudio.sln` → **Build succeeded, 0 warnings, 0 errors**.
-- `dotnet test CodeForgeStudio.sln` → **121 passed, 0 failed** (110 + 11 new: output parser, report bounding, plan allow-list, real successful and failing `dotnet build`, no-project, cancel, timeout).
+- `dotnet test CodeForgeStudio.sln` → **130 passed, 0 failed** (121 + 9 new plan tests: parser variants, caps, step prompt tags, plan-mode prompt).
+- Earlier: 121 passed after Phase 4 (110 + 11: output parser, report bounding, plan allow-list, real successful and failing `dotnet build`, no-project, cancel, timeout).
 - Phase 4 live smoke (exe via UI Automation, temp project with a missing semicolon, real model): Build → permission dialog → "✗ Build failed — 1 errors"; **Ask AI to fix** → model proposed the fix, write-permission dialog, applied; Build again → "✓ Build succeeded — 0 errors". A real bug (Build button stayed disabled after opening a project) was found by this smoke test and fixed.
 - Phase 3 live smoke (exe via UI Automation, temp project and data dir, real `qwen2.5-coder:7b`): asked to change `Hello` to return "World"; a diff card appeared (+1 −1, Pending); **Apply** changed the file and created a backup; **Undo** restored the original text. Reject is covered at ViewModel level only (not clicked live).
 - Two test failures found and fixed during development: drive-root detection and expression-bodied C# methods missing from the outline.
