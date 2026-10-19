@@ -1,0 +1,25 @@
+<Window x:Class="CodeForge.Studio.Views.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Settings" Width="520" SizeToContent="Height" WindowStartupLocation="CenterOwner" ResizeMode="NoResize" Icon="../Assets/app.ico"
+        Background="{StaticResource WindowBrush}" FontFamily="Segoe UI" FontSize="14">
+    <StackPanel Margin="20">
+        <TextBlock Text="Ollama URL"/>
+        <TextBox Text="{Binding OllamaUrl, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12"/>
+        <TextBlock Text="Default model"/>
+        <TextBox Text="{Binding Model, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12"/>
+        <TextBlock Text="Request timeout (seconds, idle)"/>
+        <TextBox Text="{Binding TimeoutSeconds, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12"/>
+        <TextBlock Text="Context window (tokens sent to Ollama as num_ctx)"/>
+        <TextBox Text="{Binding ContextWindowTokens, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12"/>
+        <TextBlock Text="System prompt"/>
+        <TextBox Text="{Binding SystemPrompt}" AcceptsReturn="True" TextWrapping="Wrap" Height="90" Margin="0,4,0,12"
+                 VerticalScrollBarVisibility="Auto"/>
+        <TextBlock Text="{Binding Error}" Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap" Margin="0,0,0,8"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Reset to defaults" Command="{Binding ResetDefaultsCommand}" Margin="0,0,8,0"/>
+            <Button Content="Cancel" Command="{Binding CancelCommand}" Margin="0,0,8,0" IsCancel="True"/>
+            <Button Content="Save" Style="{StaticResource AccentButton}" Command="{Binding SaveCommand}" IsDefault="True"/>
+        </StackPanel>
+    </StackPanel>
+</Window>
