@@ -41,6 +41,8 @@ public sealed record SearchResultItem(string RelativePath, int Line, string Disp
     public bool HasSnippet => !string.IsNullOrEmpty(Snippet);
 }
 
+public sealed record NoteItem(long Id, string Text);
+
 public sealed partial class ProjectViewModel : ObservableObject
 {
     private readonly IProjectWorkspace _workspace;
@@ -55,9 +57,78 @@ public sealed partial class ProjectViewModel : ObservableObject
     private CancellationTokenSource? _searchCts;
     private string? _previewPath;
 
-    public ProjectViewModel(IProjectWorkspace workspace, ISettingsStore settings, IUiServices ui, IBuildService build, ILogger<ProjectViewModel> log)
+    public ProjectViewModel(IProjectWorkspace workspace, ISettingsStore settings, IUiServices ui, IBuildService build,
+        IMemoryStore memory, ILogger<ProjectViewModel> log)
     {
-        _workspace = workspace; _settings = settings; _ui = ui; _build = build; _log = log;
+        _workspace = workspace; _settings = settings; _ui = ui; _build = build; _memory = memory; _log = log;
+    }
+
+    private readonly IMemoryStore _memory;
+    public ObservableCollection<NoteItem> Notes { get; } = new();
+    [ObservableProperty] private bool _memoryExpanded;
+    [ObservableProperty] private string _newNoteText = string.Empty;
+    [ObservableProperty] private string? _memoryError;
+    public string MemoryHeader => $"🧠 Memory ({Notes.Count})";
+
+    partial void OnInfoChanged(ProjectInfo? value) => _ = ReloadNotesAsync();
+
+    private async Task ReloadNotesAsync()
+    {
+        try
+        {
+            var root = Info?.RootPath;
+            var notes = root is null ? Array.Empty<MemoryNote>() : await _memory.ListNotesAsync(root);
+            if (Info?.RootPath != root) return; // project changed while loading
+            Notes.Clear();
+            foreach (var n in notes) Notes.Add(new NoteItem(n.Id, n.Text));
+            MemoryError = null;
+            OnPropertyChanged(nameof(MemoryHeader));
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Could not load memory notes");
+            MemoryError = "Could not load memory: " + ex.Message;
+        }
+    }
+
+    /// <summary>Saves a note for the open project; returns an error message or null on success.</summary>
+    public async Task<string?> RememberAsync(string text)
+    {
+        if (Info is null) return "Open a project first — notes are saved per project.";
+        try
+        {
+            var n = await _memory.AddNoteAsync(Info.RootPath, text);
+            Notes.Add(new NoteItem(n.Id, n.Text));
+            OnPropertyChanged(nameof(MemoryHeader));
+            return null;
+        }
+        catch (ProjectException ex) { return ex.Message; }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Could not save memory note");
+            return "Could not save note: " + ex.Message;
+        }
+    }
+
+    [RelayCommand]
+    private async Task AddNoteAsync()
+    {
+        var err = await RememberAsync(NewNoteText);
+        MemoryError = err;
+        if (err is null) NewNoteText = string.Empty;
+    }
+
+    [RelayCommand]
+    private async Task DeleteNoteAsync(NoteItem? note)
+    {
+        if (note is null) return;
+        try
+        {
+            await _memory.DeleteNoteAsync(note.Id);
+            Notes.Remove(note);
+            OnPropertyChanged(nameof(MemoryHeader));
+        }
+        catch (Exception ex) { MemoryError = "Could not delete note: " + ex.Message; }
     }
 
     [ObservableProperty] [NotifyCanExecuteChangedFor(nameof(BuildCommand), nameof(TestCommand), nameof(StopBuildCommand), nameof(FixBuildErrorsCommand))]

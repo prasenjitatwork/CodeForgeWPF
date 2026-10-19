@@ -33,6 +33,7 @@ public sealed partial class MainViewModel : ObservableObject
         await SendAsync();
     }
     private readonly ILogger<MainViewModel> _log;
+    private readonly IMemoryStore _memory;
 
     private Conversation _current = new();
     private CancellationTokenSource? _generationCts;
@@ -41,9 +42,9 @@ public sealed partial class MainViewModel : ObservableObject
     private string _lastUrl = string.Empty;
 
     public MainViewModel(ChatAgent agent, IChatModelClient client, IConversationRepository repo,
-        ISettingsStore settings, IUiServices ui, ProjectViewModel project, IEditService edits, ILogger<MainViewModel> log)
+        ISettingsStore settings, IUiServices ui, ProjectViewModel project, IEditService edits, IMemoryStore memory, ILogger<MainViewModel> log)
     {
-        _agent = agent; _client = client; _repo = repo; _settings = settings; _ui = ui; _log = log; _edits = edits;
+        _agent = agent; _client = client; _repo = repo; _settings = settings; _ui = ui; _log = log; _edits = edits; _memory = memory;
         Project = project;
         Project.PromptRequested += async (_, prompt) =>
         {
@@ -203,6 +204,7 @@ public sealed partial class MainViewModel : ObservableObject
         CurrentTitle = conv.Title;
         ErrorMessage = null;
         OnPropertyChanged(nameof(HasMessages));
+        if (conv.Messages.Count > 0) _ = RestorePlansAsync(conv);
     }
 
     private Task StartNewConversationCoreAsync()
@@ -225,6 +227,7 @@ public sealed partial class MainViewModel : ObservableObject
         try
         {
             await _repo.DeleteAsync(item.Id);
+            try { await _memory.DeletePlansAsync(item.Id); } catch (Exception ex) { _log.LogWarning(ex, "Could not delete saved plans"); }
             var wasCurrent = item.Id == _current.Id;
             Conversations.Remove(item);
             if (wasCurrent) await StartNewConversationCoreAsync();
@@ -244,6 +247,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (IsGenerating) return;
         var text = InputText.Trim();
         if (text.Length == 0) return;
+        if (await TryRememberCommandAsync(text)) return;
         var model = SelectedModel ?? _settings.Current.Model;
         var planMode = PlanMode;
         var stepCtx = _pendingStep;
@@ -326,9 +330,55 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
         var plan = new PlanViewModel(parsed);
-        plan.StepRequested += OnStepRequested;
+        AttachPlanVm(vm.Model.Id, plan);
         vm.Plan = plan;
         PlanMode = false;
+        SavePlan(vm.Model.Id, plan);
+    }
+
+    private void AttachPlanVm(Guid messageId, PlanViewModel plan)
+    {
+        plan.StepRequested += OnStepRequested;
+        plan.Changed += (_, _) => SavePlan(messageId, plan);
+    }
+
+    private async void SavePlan(Guid messageId, PlanViewModel plan)
+    {
+        try { await _memory.SavePlanAsync(_current.Id, plan.ToStored(messageId)); }
+        catch (Exception ex) { _log.LogWarning(ex, "Could not save plan"); }
+    }
+
+    private async Task RestorePlansAsync(Conversation conv)
+    {
+        try
+        {
+            var plans = await _memory.LoadPlansAsync(conv.Id);
+            if (_current.Id != conv.Id) return; // user switched away while loading
+            foreach (var sp in plans)
+            {
+                var msg = Messages.FirstOrDefault(m => m.Model.Id == sp.MessageId);
+                if (msg is null || msg.Plan is not null) continue;
+                var plan = new PlanViewModel(sp);
+                AttachPlanVm(sp.MessageId, plan);
+                msg.Plan = plan;
+            }
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "Could not restore plans"); }
+    }
+
+    private async Task<bool> TryRememberCommandAsync(string text)
+    {
+        const string cmd = "/remember";
+        if (!text.StartsWith(cmd, StringComparison.OrdinalIgnoreCase) || (text.Length > cmd.Length && !char.IsWhiteSpace(text[cmd.Length])))
+            return false;
+        InputText = string.Empty;
+        var note = text[cmd.Length..].Trim();
+        var err = await Project.RememberAsync(note);
+        var reply = new ChatMessage { Role = ChatRole.Assistant, Content = err is null ? "🧠 Saved to project memory: " + note : "🧠 Not saved: " + err };
+        Messages.Add(new MessageViewModel(reply)); // shown only; never stored in the conversation or sent to the model
+        if (err is null) Project.MemoryExpanded = true;
+        OnPropertyChanged(nameof(HasMessages));
+        return true;
     }
 
     private async Task ProposeEditsAsync(MessageViewModel vm, string content)

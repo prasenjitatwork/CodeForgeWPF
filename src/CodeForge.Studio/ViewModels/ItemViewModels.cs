@@ -116,12 +116,31 @@ public sealed partial class PlanViewModel : ObservableObject
     public List<PlanStepViewModel> Steps { get; }
     public event EventHandler<(PlanViewModel Plan, PlanStepViewModel Step)>? StepRequested;
 
-    public PlanViewModel(ParsedPlan plan)
+    public event EventHandler? Changed;
+
+    public PlanViewModel(ParsedPlan plan) : this(plan.Title, plan.Steps.Select(s => (s, PlanStepStatus.Pending))) { }
+
+    public PlanViewModel(StoredPlan stored) : this(stored.Title, stored.Steps.Select(s =>
     {
-        Title = plan.Title;
-        Steps = plan.Steps.Select((s, i) => new PlanStepViewModel(i + 1, s)).ToList();
-        foreach (var s in Steps) s.PropertyChanged += (_, _) => OnPropertyChanged(nameof(Progress));
+        var st = Enum.TryParse<PlanStepStatus>(s.Status, out var v) ? v : PlanStepStatus.Pending;
+        return (s.Text, st == PlanStepStatus.Running ? PlanStepStatus.Pending : st); // a run cannot survive a restart
+    })) { }
+
+    private PlanViewModel(string title, IEnumerable<(string Text, PlanStepStatus Status)> steps)
+    {
+        Title = title;
+        Steps = steps.Select((s, i) => new PlanStepViewModel(i + 1, s.Text) { Status = s.Status }).ToList();
+        foreach (var s in Steps)
+            s.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName != nameof(PlanStepViewModel.Status)) return;
+                OnPropertyChanged(nameof(Progress));
+                Changed?.Invoke(this, EventArgs.Empty);
+            };
     }
+
+    public StoredPlan ToStored(Guid messageId) =>
+        new(messageId, Title, Steps.Select(s => new StoredPlanStep(s.Text, s.Status.ToString())).ToList());
 
     public string Progress
     {

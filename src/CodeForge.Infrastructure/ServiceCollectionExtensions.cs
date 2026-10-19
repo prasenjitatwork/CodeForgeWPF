@@ -19,6 +19,7 @@ public static class ServiceCollectionExtensions
             new JsonSettingsStore(Path.Combine(dataDir, "settings.json"), sp.GetRequiredService<ILogger<JsonSettingsStore>>()));
         services.AddSingleton<IConversationRepository>(_ =>
             new SqliteConversationRepository(Path.Combine(dataDir, "conversations.db")));
+        services.AddSingleton<IMemoryStore>(_ => new SqliteMemoryStore(Path.Combine(dataDir, "memory.db")));
         // Timeout is enforced per request (idle timeout) in OllamaClient, so streaming isn't cut off.
         services.AddHttpClient<IChatModelClient, OllamaClient>(c => c.Timeout = System.Threading.Timeout.InfiniteTimeSpan);
         return services;

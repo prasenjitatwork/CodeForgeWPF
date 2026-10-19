@@ -92,6 +92,7 @@
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <WrapPanel Margin="0,0,0,6">
                     <Button Content="Open folder…" Command="{Binding OpenFolderCommand}" Margin="0,0,4,4" Padding="8,4"/>
@@ -202,6 +203,30 @@
                         <TextBox Text="{Binding BuildOutput, Mode=OneWay}" IsReadOnly="True" Height="150" Margin="0,4,0,0"
                                  FontFamily="Consolas" FontSize="11" Background="{StaticResource CodeBgBrush}" TextWrapping="NoWrap"
                                  HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"/>
+                    </StackPanel>
+                </Expander>
+                <Expander Grid.Row="6" Header="{Binding MemoryHeader}" IsExpanded="{Binding MemoryExpanded, Mode=TwoWay}"
+                          Foreground="{StaticResource TextBrush}" Margin="0,6,0,0">
+                    <StackPanel Margin="0,6,0,0">
+                        <TextBlock Text="Short notes sent with every question about this project. Never store secrets. Tip: type /remember … in the chat."
+                                   FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,4"/>
+                        <ItemsControl ItemsSource="{Binding Notes}" MaxHeight="150">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <DockPanel Margin="0,2">
+                                        <Button DockPanel.Dock="Right" Content="✕" Padding="5,0" Margin="6,0,0,0" ToolTip="Delete note"
+                                                Command="{Binding DataContext.DeleteNoteCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                CommandParameter="{Binding}"/>
+                                        <TextBlock Text="{Binding Text}" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource TextBrush}"/>
+                                    </DockPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBox AutomationProperties.AutomationId="NoteBox" Text="{Binding NewNoteText, UpdateSourceTrigger=PropertyChanged}"
+                                 MaxLength="500" Margin="0,4,0,4" TextWrapping="Wrap" IsEnabled="{Binding HasProject}"/>
+                        <Button Content="Add note" Command="{Binding AddNoteCommand}" HorizontalAlignment="Left" Padding="8,3"
+                                IsEnabled="{Binding HasProject}"/>
+                        <TextBlock Text="{Binding MemoryError}" Foreground="{StaticResource DangerBrush}" FontSize="11" TextWrapping="Wrap"/>
                     </StackPanel>
                 </Expander>
             </Grid>
