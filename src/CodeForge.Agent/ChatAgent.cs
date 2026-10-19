@@ -27,13 +27,19 @@ public sealed class ChatAgent
         "Use it only to answer the user's question, and cite file paths when relevant. " +
         "If it is not sufficient, say so instead of guessing.";
 
+    public const string EditInstructions =
+        "When the user asks you to change code, propose edits in exactly this format, one block per change:\n" +
+        "FILE: relative/path/to/file.ext\n<<<<<<< SEARCH\n(exact existing lines, unique in the file)\n=======\n(replacement lines)\n>>>>>>> REPLACE\n" +
+        "Rules: SEARCH must match the existing file exactly and be unique; use an empty SEARCH only to create a new file; " +
+        "never delete or rename files; never edit secret or binary files. These are proposals the user must approve.";
+
     public static IReadOnlyList<ModelChatMessage> BuildPrompt(
         string systemPrompt, IEnumerable<ChatMessage> history, string? projectContext = null)
     {
         var list = new List<ModelChatMessage>();
         var system = systemPrompt ?? "";
         if (!string.IsNullOrWhiteSpace(projectContext))
-            system = system + "\n\n" + UntrustedNotice + "\n<project_context>\n" + projectContext + "\n</project_context>";
+            system = system + "\n\n" + UntrustedNotice + "\n<project_context>\n" + projectContext + "\n</project_context>\n\n" + EditInstructions;
         if (!string.IsNullOrWhiteSpace(system))
             list.Add(new("system", system.Trim()));
         var recent = history

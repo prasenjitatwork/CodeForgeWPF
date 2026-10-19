@@ -91,6 +91,7 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <WrapPanel Margin="0,0,0,6">
                     <Button Content="Open folder…" Command="{Binding OpenFolderCommand}" Margin="0,0,4,4" Padding="8,4"/>
@@ -185,6 +186,24 @@
                                  HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"/>
                     </DockPanel>
                 </Border>
+                <Expander Grid.Row="5" Header="🔨 Build &amp; Test" IsExpanded="{Binding BuildExpanded, Mode=TwoWay}"
+                          Foreground="{StaticResource TextBrush}" Margin="0,6,0,0">
+                    <StackPanel Margin="0,6,0,0">
+                        <WrapPanel>
+                            <Button Content="Build" Command="{Binding BuildCommand}" Margin="0,0,4,4" Padding="8,4"
+                                    ToolTip="Runs dotnet build (or flutter analyze)"/>
+                            <Button Content="Test" Command="{Binding TestCommand}" Margin="0,0,4,4" Padding="8,4"
+                                    ToolTip="Runs dotnet test (or flutter test)"/>
+                            <Button Content="■ Stop" Command="{Binding StopBuildCommand}" Margin="0,0,4,4" Padding="8,4"/>
+                            <Button Content="Ask AI to fix" Command="{Binding FixBuildErrorsCommand}" Style="{StaticResource AccentButton}"
+                                    Margin="0,0,0,4" Padding="8,4" ToolTip="Send the failure to the assistant"/>
+                        </WrapPanel>
+                        <TextBlock Text="{Binding BuildStatus}" FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}"/>
+                        <TextBox Text="{Binding BuildOutput, Mode=OneWay}" IsReadOnly="True" Height="150" Margin="0,4,0,0"
+                                 FontFamily="Consolas" FontSize="11" Background="{StaticResource CodeBgBrush}" TextWrapping="NoWrap"
+                                 HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"/>
+                    </StackPanel>
+                </Expander>
             </Grid>
             <Button Grid.Row="2" Content="⚙  Settings" Margin="14" Command="{Binding OpenSettingsCommand}"/>
         </Grid>
@@ -263,6 +282,67 @@
                                         <TextBlock Text="{Binding ContextNote}" FontSize="11" Foreground="{StaticResource MutedBrush}"
                                                    TextWrapping="Wrap" Margin="0,4,0,0"
                                                    Visibility="{Binding HasContextNote, Converter={StaticResource BoolToVis}}"/>
+                                        <TextBlock Text="{Binding Problems}" FontSize="11" Foreground="{StaticResource WarnBrush}"
+                                                   TextWrapping="Wrap" Margin="0,6,0,0"
+                                                   Visibility="{Binding HasProblems, Converter={StaticResource BoolToVis}}"/>
+                                        <ItemsControl ItemsSource="{Binding Changes}" Margin="0,6,0,0">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate DataType="{x:Type vm:ChangeViewModel}">
+                                                    <Border Background="{StaticResource CodeBgBrush}" BorderBrush="{StaticResource SurfaceHoverBrush}"
+                                                            BorderThickness="1" CornerRadius="6" Margin="0,4,0,4" Padding="8">
+                                                        <StackPanel>
+                                                            <DockPanel>
+                                                                <TextBlock Text="{Binding StateText}" DockPanel.Dock="Right" FontSize="11"
+                                                                           Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+                                                                <TextBlock Text="{Binding Stats}" DockPanel.Dock="Right" Margin="0,0,10,0"
+                                                                           Foreground="{StaticResource OkBrush}" VerticalAlignment="Center"/>
+                                                                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
+                                                                           Foreground="{StaticResource TextBrush}"/>
+                                                            </DockPanel>
+                                                            <ScrollViewer MaxHeight="260" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Margin="0,6,0,6">
+                                                                <ItemsControl ItemsSource="{Binding Lines}">
+                                                                    <ItemsControl.ItemTemplate>
+                                                                        <DataTemplate DataType="{x:Type vm:DiffLineViewModel}">
+                                                                            <Border x:Name="Row" Background="Transparent">
+                                                                                <StackPanel Orientation="Horizontal">
+                                                                                    <TextBlock Text="{Binding Number}" Width="40" TextAlignment="Right" Margin="0,0,8,0"
+                                                                                               FontFamily="Consolas" FontSize="12" Foreground="{StaticResource MutedBrush}"/>
+                                                                                    <TextBlock x:Name="Txt" FontFamily="Consolas" FontSize="12" Foreground="{StaticResource MutedBrush}">
+                                                                                        <Run Text="{Binding Prefix, Mode=OneWay}"/><Run Text="{Binding Text, Mode=OneWay}"/>
+                                                                                    </TextBlock>
+                                                                                </StackPanel>
+                                                                            </Border>
+                                                                            <DataTemplate.Triggers>
+                                                                                <DataTrigger Binding="{Binding Kind}" Value="Added">
+                                                                                    <Setter TargetName="Row" Property="Background" Value="#1F3FB950"/>
+                                                                                    <Setter TargetName="Txt" Property="Foreground" Value="{StaticResource OkBrush}"/>
+                                                                                </DataTrigger>
+                                                                                <DataTrigger Binding="{Binding Kind}" Value="Removed">
+                                                                                    <Setter TargetName="Row" Property="Background" Value="#1FE5534B"/>
+                                                                                    <Setter TargetName="Txt" Property="Foreground" Value="{StaticResource DangerBrush}"/>
+                                                                                </DataTrigger>
+                                                                                <DataTrigger Binding="{Binding Kind}" Value="Context">
+                                                                                    <Setter TargetName="Txt" Property="Foreground" Value="{StaticResource TextBrush}"/>
+                                                                                </DataTrigger>
+                                                                            </DataTemplate.Triggers>
+                                                                        </DataTemplate>
+                                                                    </ItemsControl.ItemTemplate>
+                                                                </ItemsControl>
+                                                            </ScrollViewer>
+                                                            <StackPanel Orientation="Horizontal">
+                                                                <Button Content="Apply" Style="{StaticResource AccentButton}" Command="{Binding ApplyCommand}" Margin="0,0,6,0"
+                                                                        IsEnabled="{Binding CanApply}" ToolTip="Write this change to the file (a backup is kept)"/>
+                                                                <Button Content="Reject" Command="{Binding RejectCommand}" Margin="0,0,6,0" IsEnabled="{Binding CanReject}"/>
+                                                                <Button Content="Undo" Command="{Binding UndoCommand}" IsEnabled="{Binding CanUndo}"
+                                                                        ToolTip="Restore the file to how it was before applying"/>
+                                                            </StackPanel>
+                                                            <TextBlock Text="{Binding Error}" Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap" Margin="0,6,0,0"
+                                                                       Visibility="{Binding HasError, Converter={StaticResource BoolToVis}}"/>
+                                                        </StackPanel>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
                                         <TextBlock Text="Generating…" FontSize="11" Foreground="{StaticResource AccentBrush}" Margin="0,4,0,0"
                                                    Visibility="{Binding IsStreaming, Converter={StaticResource BoolToVis}}"/>
                                     </StackPanel>

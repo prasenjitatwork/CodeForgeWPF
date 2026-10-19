@@ -22,6 +22,8 @@ public sealed class ProjectWorkspace : IProjectWorkspace, IProjectContextProvide
     public bool IndexTruncated => _session?.Truncated ?? false;
     public bool ContextEnabled { get; set; } = true;
 
+    internal ProjectSession? Session => _session;
+
     private ProjectSession Require() => _session ?? throw new ProjectException("No project is open.");
 
     private static T Guarded<T>(Func<T> action)

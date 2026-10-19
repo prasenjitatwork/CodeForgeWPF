@@ -27,8 +27,9 @@ public partial class App : System.Windows.Application
 
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.AddDebug().SetMinimumLevel(LogLevel.Information));
-        sc.AddCodeForgeInfrastructure(Environment.GetEnvironmentVariable("CODEFORGE_DATA_DIR"));
-        sc.AddCodeForgeProjectTools();
+        var dataDir = Environment.GetEnvironmentVariable("CODEFORGE_DATA_DIR") ?? Infrastructure.ServiceCollectionExtensions.DefaultDataDirectory;
+        sc.AddCodeForgeInfrastructure(dataDir);
+        sc.AddCodeForgeProjectTools(dataDir);
         sc.AddSingleton<ProjectViewModel>();
         sc.AddSingleton<ChatAgent>();
         sc.AddSingleton<IUiServices, UiServices>();

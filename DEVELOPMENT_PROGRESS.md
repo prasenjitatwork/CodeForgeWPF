@@ -8,10 +8,29 @@
 | Phase | Name | Status |
 |---|---|---|
 | 1 | WPF chat connected to Ollama | **Completed** |
-| 2 | Project selection, file reading, search, code understanding (read-only) | **Completed — Waiting for User Approval of Phase 3** |
-| 3–6 | Edits/diffs/approval, build/test, planning, memory | Not Started |
+| 2 | Project selection, file reading, search, code understanding (read-only) | **Completed** |
+| 3 | Proposed code edits, diffs, approval | **Completed** |
+| 4 | Build and test runner, error feedback to the AI | **Completed — Waiting for User Approval of Phase 5** |
+| 5–6 | Planning, memory | Not Started |
 
-**Exact next action:** Ask the user whether to proceed to Phase 3 (Proposed Code Edits, Diffs, and Approval). **User approval is required** — do not start Phase 3 without it.
+**Exact next action:** Ask the user whether to proceed to Phase 5. **User approval is required** — do not start Phase 5 without it.
+
+## Phase 4 — completed features (fixed commands only)
+- **Project tab → "🔨 Build & Test"** expander: **Build**, **Test**, **■ Stop**, **Ask AI to fix**, status line, live output box.
+- **Commands (allow-list, no shell, no user-typed commands):** Solution/C# project → `dotnet build|test <entry> --nologo -nodeReuse:false`; Flutter → `flutter analyze|test`; plain folder → refused. Working dir = project root; entry file must be inside the root; stdin closed; telemetry off; output capped (200k chars, newest kept); 10-minute timeout; Stop/timeout kills the whole process tree; one run at a time.
+- **Permission:** first run per folder asks "Allow CodeForge to run build and test commands in this folder?" (shows the command; default No; in-memory, per folder). Runs are always started by the user's click.
+- **Diagnostics:** MSBuild/Roslyn errors and warnings (file, line, code), failed test names, Flutter analyze issues are parsed, deduplicated and capped (50); status shows errors/warnings count.
+- **Ask AI to fix:** sends a bounded summary (errors + end of output) wrapped as untrusted `<build_output>` into the chat. The normal Phase 3 edit flow then proposes and (with folder write permission) applies the fix; you press Build again to verify.
+- Files: `Application\Build.cs` (`IBuildService`, `BuildResult`, `BuildReport`), `Tools\BuildService.cs`, `Tools\BuildOutputParser.cs`, Studio `ProjectViewModel` build commands, `UiServices.ConfirmRunCommands`.
+
+## Phase 3 — completed features (writes only after explicit approval)
+- **Edit proposals:** when a project is open, the system prompt also describes a `FILE:` + `<<<<<<< SEARCH / ======= / >>>>>>> REPLACE` format (empty SEARCH creates a new file). After the reply finishes streaming, `EditParser` extracts blocks (≤20) and `EditService.PrepareAsync` validates them **in memory only**.
+- **Validation:** path via `ProjectPathGuard`; refuses excluded folders, secret files, binary types, links, folders; SEARCH must match exactly once (trailing-whitespace tolerant fallback); no-op changes, ambiguous/missing matches, invalid UTF-8, binary, and >1 MB results are reported as problems, never applied.
+- **Folder permission (auto-apply):** the first time edits are proposed for a project folder, a dialog asks "Allow CodeForge to create and modify files inside this folder?". **Yes** → this and later edits for that folder apply automatically until the app closes (Undo and backups remain). **No** → cards stay Pending with manual Apply/Reject. Permission is in-memory only, per folder, never persisted. All path/secret/stale checks still run.
+- **UI:** each proposed file shows a card in the assistant message: path, +/− counts, colored line-numbered diff (context collapsed), state, and **Apply / Reject / Undo** buttons.
+- **Apply:** re-resolves path and policy, requires the file to be unchanged since proposal (SHA-256), same project still open, change prepared by this session (forged/duplicate applies refused), backs the original up to `<data dir>\backups\<timestamp>-<id>\<path>`, writes atomically (temp + move), preserves BOM and CRLF/LF. Project tree refreshes afterwards.
+- **Undo:** restores backup (or deletes a created file) only if the file is still exactly as applied; otherwise refused.
+- Files: `Application\Edits.cs`, `Tools\DiffEngine.cs`, `EditParser.cs`, `EditService.cs`; Studio `ChangeViewModel` / diff template; `ChatAgent.EditInstructions`; `AddCodeForgeProjectTools(dataDir)` now takes the data dir.
 
 ## Phase 1 — completed features
 - Dark-themed WPF chat UI, conversation history (SQLite), Settings dialog, streaming Ollama client with typed errors, Stop, connection indicator.
@@ -36,12 +55,16 @@
 
 ## Build and tests (actually executed)
 - `dotnet build CodeForgeStudio.sln` → **Build succeeded, 0 warnings, 0 errors**.
-- `dotnet test CodeForgeStudio.sln` → **77 passed, 0 failed** (21 from Phase 1 + 56 new: path guard incl. real junction escape, file policy, locator, workspace read/search/summary/outline/context with secrets never leaking, agent prompt injection).
+- `dotnet test CodeForgeStudio.sln` → **121 passed, 0 failed** (110 + 11 new: output parser, report bounding, plan allow-list, real successful and failing `dotnet build`, no-project, cancel, timeout).
+- Phase 4 live smoke (exe via UI Automation, temp project with a missing semicolon, real model): Build → permission dialog → "✗ Build failed — 1 errors"; **Ask AI to fix** → model proposed the fix, write-permission dialog, applied; Build again → "✓ Build succeeded — 0 errors". A real bug (Build button stayed disabled after opening a project) was found by this smoke test and fixed.
+- Phase 3 live smoke (exe via UI Automation, temp project and data dir, real `qwen2.5-coder:7b`): asked to change `Hello` to return "World"; a diff card appeared (+1 −1, Pending); **Apply** changed the file and created a backup; **Undo** restored the original text. Reject is covered at ViewModel level only (not clicked live).
 - Two test failures found and fixed during development: drive-root detection and expression-bodied C# methods missing from the outline.
 - App smoke test (exe driven through UI Automation, isolated data dir): last project auto-reopened ("CodeForgeWPF (Solution)", 48 files, tree shown); **Explain project** sent a question; Ollama streamed a coherent answer about CodeForge Studio; the message showed "Project context: MainViewModel.cs, ProjectViewModel.cs, DEVELOPMENT_PROGRESS.md, App.xaml.cs"; header checkbox shown.
 - Not manually exercised in the live UI: Open folder/file dialogs, search box, Outline button (covered by unit tests at the workspace level only).
 
 ## Known limitations
+- Build/test: only dotnet and Flutter; Flutter path is untested live (no Flutter SDK checked); xUnit/MSBuild-style output parsing only; cancel and timeout unit tests are weak because commands are fixed (live Stop not clicked); output is shown only in the sidebar box; no automatic build after an edit.
+- Edits: no delete/rename; UTF-8 text only; ≤1 MB files; pending proposals are not persisted across restarts; Undo works only in the same session; a 7B model may not follow the SEARCH/REPLACE format exactly (such cases show as problems, not changes). Edits from earlier chat messages can still be applied if the file is unchanged.
 - Retrieval is keyword-based (no embeddings/persistent index — planned for Phase 6); a question using different words than the code may miss the relevant file.
 - Outline is regex-based (C# and Dart only), not a real parser.
 - Index is in-memory and rebuilt on open/Refresh; no file watcher.
@@ -50,6 +73,6 @@
 - No ViewModel/UI automated tests.
 
 ## Decisions affecting future work
-- All file access goes through `ProjectSession`/`ProjectPathGuard`; Phase 3 writes must reuse the guard and add explicit user approval and diff preview.
+- All file access goes through `ProjectSession`/`ProjectPathGuard`; all writes go only through `EditService` (approval, stale-check, backup). Later phases (e.g., build/test) must not bypass it.
 - `Application` namespace clashes with `System.Windows.Application` inside Studio — use the fully qualified name.
 - Settings changes use `AppSettings.Clone()` so unrelated fields are preserved.

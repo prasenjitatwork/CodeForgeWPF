@@ -47,12 +47,112 @@ public sealed partial class ProjectViewModel : ObservableObject
     private readonly ISettingsStore _settings;
     private readonly IUiServices _ui;
     private readonly ILogger<ProjectViewModel> _log;
+    private readonly IBuildService _build;
+    private readonly HashSet<string> _commandsGranted = new(StringComparer.OrdinalIgnoreCase);
+    private readonly System.Text.StringBuilder _liveOutput = new();
+    private CancellationTokenSource? _buildCts;
+    private bool _flushPending;
     private CancellationTokenSource? _searchCts;
     private string? _previewPath;
 
-    public ProjectViewModel(IProjectWorkspace workspace, ISettingsStore settings, IUiServices ui, ILogger<ProjectViewModel> log)
+    public ProjectViewModel(IProjectWorkspace workspace, ISettingsStore settings, IUiServices ui, IBuildService build, ILogger<ProjectViewModel> log)
     {
-        _workspace = workspace; _settings = settings; _ui = ui; _log = log;
+        _workspace = workspace; _settings = settings; _ui = ui; _build = build; _log = log;
+    }
+
+    [ObservableProperty] [NotifyCanExecuteChangedFor(nameof(BuildCommand), nameof(TestCommand), nameof(StopBuildCommand), nameof(FixBuildErrorsCommand))]
+    private bool _isBuilding;
+    [ObservableProperty] private bool _buildExpanded;
+    [ObservableProperty] private string _buildStatus = "Not run yet";
+    [ObservableProperty] private string _buildOutput = string.Empty;
+    [ObservableProperty] [NotifyCanExecuteChangedFor(nameof(FixBuildErrorsCommand))]
+    private BuildResult? _lastBuild;
+
+    private bool CanRunBuild() => HasProject && !IsBuilding;
+    private bool CanFix() => !IsBuilding && LastBuild is { Success: false, Cancelled: false };
+
+    [RelayCommand(CanExecute = nameof(CanRunBuild))] private Task BuildAsync() => RunBuildAsync(BuildAction.Build);
+    [RelayCommand(CanExecute = nameof(CanRunBuild))] private Task TestAsync() => RunBuildAsync(BuildAction.Test);
+
+    [RelayCommand(CanExecute = nameof(IsBuilding))]
+    private void StopBuild() => _buildCts?.Cancel();
+
+    [RelayCommand(CanExecute = nameof(CanFix))]
+    private void FixBuildErrors()
+    {
+        if (LastBuild is { } r) PromptRequested?.Invoke(this, BuildReport.Prompt(r));
+    }
+
+    private async Task RunBuildAsync(BuildAction action)
+    {
+        if (Info is null || IsBuilding) return;
+        Error = null;
+        string command;
+        try { command = _build.Describe(action); }
+        catch (ProjectException ex) { Error = ex.Message; return; }
+
+        var root = Info.RootPath;
+        if (!_commandsGranted.Contains(root))
+        {
+            if (!_ui.ConfirmRunCommands(root, command)) return;
+            _commandsGranted.Add(root);
+        }
+
+        lock (_liveOutput) _liveOutput.Clear();
+        BuildOutput = string.Empty;
+        LastBuild = null;
+        BuildExpanded = true;
+        BuildStatus = $"Running: {command} …";
+        IsBuilding = true;
+        _buildCts = new CancellationTokenSource();
+        try
+        {
+            var r = await _build.RunAsync(action, OnBuildLine, _buildCts.Token);
+            LastBuild = r;
+            BuildOutput = Tail(r.Output, 30_000);
+            var secs = r.Duration.TotalSeconds.ToString("0.0");
+            BuildStatus = r.Cancelled ? $"■ {action} stopped."
+                : r.TimedOut ? $"✗ {action} timed out after {secs}s and was stopped."
+                : r.Success ? $"✓ {action} succeeded in {secs}s — {r.ErrorCount} errors, {r.WarningCount} warnings"
+                : $"✗ {action} failed (exit {r.ExitCode}, {secs}s) — {r.ErrorCount} errors, {r.WarningCount} warnings";
+        }
+        catch (ProjectException ex)
+        {
+            Error = ex.Message;
+            BuildStatus = "Could not run.";
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Build run failed");
+            Error = "Unexpected error: " + ex.Message;
+            BuildStatus = "Could not run.";
+        }
+        finally
+        {
+            _buildCts?.Dispose();
+            _buildCts = null;
+            IsBuilding = false;
+        }
+    }
+
+    private static string Tail(string s, int max) => s.Length <= max ? s : "…" + s[^max..];
+
+    // Called from a worker thread; coalesce UI updates so a chatty build cannot flood the dispatcher.
+    private void OnBuildLine(string line)
+    {
+        lock (_liveOutput)
+        {
+            _liveOutput.AppendLine(line);
+            if (_liveOutput.Length > 60_000) _liveOutput.Remove(0, _liveOutput.Length - 60_000);
+            if (_flushPending) return;
+            _flushPending = true;
+        }
+        System.Windows.Application.Current?.Dispatcher.BeginInvoke(() =>
+        {
+            string text;
+            lock (_liveOutput) { text = Tail(_liveOutput.ToString(), 30_000); _flushPending = false; }
+            if (IsBuilding) BuildOutput = text;
+        }, System.Windows.Threading.DispatcherPriority.Background);
     }
 
     public event EventHandler<string>? PromptRequested;
@@ -63,6 +163,7 @@ public sealed partial class ProjectViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasProject))]
     [NotifyPropertyChangedFor(nameof(Title))]
+    [NotifyCanExecuteChangedFor(nameof(BuildCommand), nameof(TestCommand))]
     private ProjectInfo? _info;
 
     [ObservableProperty] private string _infoText = "No project open";

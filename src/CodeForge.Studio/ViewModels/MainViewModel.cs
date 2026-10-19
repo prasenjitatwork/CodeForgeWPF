@@ -16,6 +16,8 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly IConversationRepository _repo;
     private readonly ISettingsStore _settings;
     private readonly IUiServices _ui;
+    private readonly IEditService _edits;
+    private readonly HashSet<string> _writeGranted = new(StringComparer.OrdinalIgnoreCase);
     private readonly ILogger<MainViewModel> _log;
 
     private Conversation _current = new();
@@ -25,9 +27,9 @@ public sealed partial class MainViewModel : ObservableObject
     private string _lastUrl = string.Empty;
 
     public MainViewModel(ChatAgent agent, IChatModelClient client, IConversationRepository repo,
-        ISettingsStore settings, IUiServices ui, ProjectViewModel project, ILogger<MainViewModel> log)
+        ISettingsStore settings, IUiServices ui, ProjectViewModel project, IEditService edits, ILogger<MainViewModel> log)
     {
-        _agent = agent; _client = client; _repo = repo; _settings = settings; _ui = ui; _log = log;
+        _agent = agent; _client = client; _repo = repo; _settings = settings; _ui = ui; _log = log; _edits = edits;
         Project = project;
         Project.PromptRequested += async (_, prompt) =>
         {
@@ -257,6 +259,7 @@ public sealed partial class MainViewModel : ObservableObject
                 assistantVm.Append(chunk);
             if (assistantModel.Content.Length == 0)
                 ErrorMessage = "The model returned an empty response.";
+            else if (!ct.IsCancellationRequested) await ProposeEditsAsync(assistantVm, assistantModel.Content);
         }
         catch (OperationCanceledException) { /* user pressed Stop; keep partial output */ }
         catch (ModelException ex)
@@ -282,6 +285,33 @@ public sealed partial class MainViewModel : ObservableObject
             _generationCts = null;
             IsGenerating = false;
             OnPropertyChanged(nameof(HasMessages));
+        }
+    }
+
+    private async Task ProposeEditsAsync(MessageViewModel vm, string content)
+    {
+        if (!Project.HasProject || !content.Contains("<<<<<<< SEARCH")) return;
+        try
+        {
+            var prepared = await _edits.PrepareAsync(content);
+            foreach (var c in prepared.Changes)
+                vm.Changes.Add(new ChangeViewModel(c, _edits, () => Project.RefreshCommand.ExecuteAsync(null)));
+            if (prepared.Problems.Count > 0) vm.Problems = string.Join("\n", prepared.Problems);
+            vm.RaiseChangesChanged();
+
+            var root = Project.Info?.RootPath;
+            if (root is null || vm.Changes.Count == 0) return;
+            if (!_writeGranted.Contains(root))
+            {
+                if (!_ui.ConfirmWriteAccess(root)) return; // stays Pending; manual Apply still available
+                _writeGranted.Add(root);
+            }
+            foreach (var change in vm.Changes) await change.ApplyCommand.ExecuteAsync(null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _log.LogWarning(ex, "Could not prepare edits");
+            vm.Problems = "Could not prepare edits: " + ex.Message;
         }
     }
 
