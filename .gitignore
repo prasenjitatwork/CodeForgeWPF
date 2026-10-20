@@ -6,3 +6,5 @@ TestResults/
 *.db
 .env
 .env.*
+
+artifacts/

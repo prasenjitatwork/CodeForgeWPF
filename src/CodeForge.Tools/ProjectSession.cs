@@ -19,6 +19,15 @@ internal sealed class ProjectSession
     public IReadOnlyList<IndexedFile> Files { get; private set; } = Array.Empty<IndexedFile>();
     public bool Truncated { get; private set; }
 
+    private ProjectIndex? _index;
+    private readonly object _indexLock = new();
+
+    /// <summary>Lazily built, cached for the lifetime of this snapshot (a new snapshot is made after every refresh or applied edit).</summary>
+    internal ProjectIndex GetIndex(CancellationToken ct)
+    {
+        lock (_indexLock) return _index ??= ProjectIndex.Build(this, ct);
+    }
+
     private ProjectSession(ProjectInfo info)
     {
         Info = info;

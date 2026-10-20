@@ -7,7 +7,7 @@ using CommunityToolkit.Mvvm.Input;
 
 namespace CodeForge.Studio.ViewModels;
 
-public enum ChangeState { Pending, Applied, Rejected, Undone, Failed }
+public enum ChangeState { Pending, Applied, Rejected, Undone, Failed, Stale }
 
 public sealed class DiffLineViewModel
 {
@@ -29,32 +29,51 @@ public sealed partial class ChangeViewModel : ObservableObject
 {
     private readonly IEditService _edits;
     private readonly Func<Task> _afterChange;
+    private readonly Func<ChangeViewModel, Task>? _stateChanged;
 
     public FileChange Change { get; }
     public IReadOnlyList<DiffLineViewModel> Lines { get; }
-    public string Title => (Change.Kind == EditKind.Create ? "New file: " : "") + Change.RelativePath;
+    public string Title => Change.Kind switch
+    {
+        EditKind.Create => "New file: " + Change.RelativePath,
+        EditKind.Delete => "Delete file: " + Change.RelativePath,
+        EditKind.Rename => $"Rename: {Change.RelativePath} → {Change.NewPath}",
+        _ => Change.RelativePath
+    };
     public string Stats => $"+{Change.Added} −{Change.Removed}";
+
+    /// <summary>Delete and rename are never applied automatically, even after folder permission.</summary>
+    public bool RequiresManualApproval => Change.Kind is EditKind.Delete or EditKind.Rename;
 
     [ObservableProperty] [NotifyPropertyChangedFor(nameof(CanApply), nameof(CanUndo), nameof(CanReject), nameof(StateText))]
     private ChangeState _state = ChangeState.Pending;
     [ObservableProperty] [NotifyPropertyChangedFor(nameof(HasError))] private string? _error;
 
     public bool HasError => !string.IsNullOrEmpty(Error);
+    [ObservableProperty] [NotifyPropertyChangedFor(nameof(HasNote))] private string? _note;
+    public bool HasNote => !string.IsNullOrEmpty(Note);
     public bool CanApply => State == ChangeState.Pending && !_busy;
-    public bool CanReject => State == ChangeState.Pending && !_busy;
+    public bool CanReject => State is ChangeState.Pending or ChangeState.Stale && !_busy;
     public bool CanUndo => State == ChangeState.Applied && !_busy;
     public string StateText => State switch
     {
         ChangeState.Applied => "Applied", ChangeState.Rejected => "Rejected", ChangeState.Undone => "Undone",
-        ChangeState.Failed => "Failed", _ => "Pending approval"
+        ChangeState.Failed => "Failed", ChangeState.Stale => "Out of date", _ => RequiresManualApproval ? "Needs your approval" : "Pending approval"
     };
 
     private bool _busy;
 
-    public ChangeViewModel(FileChange change, IEditService edits, Func<Task> afterChange)
+    public ChangeViewModel(FileChange change, IEditService edits, Func<Task> afterChange, Func<ChangeViewModel, Task>? stateChanged = null)
     {
-        Change = change; _edits = edits; _afterChange = afterChange;
+        Change = change; _edits = edits; _afterChange = afterChange; _stateChanged = stateChanged;
         Lines = change.Diff.Select(d => new DiffLineViewModel(d)).ToList();
+    }
+
+    /// <summary>Used when rehydrating a saved proposal after revalidation.</summary>
+    public void MarkRestored(ChangeState state, string? note)
+    {
+        State = state;
+        if (state == ChangeState.Stale) Error = note; else Note = note;
     }
 
     private void SetBusy(bool v)
@@ -63,20 +82,27 @@ public sealed partial class ChangeViewModel : ObservableObject
         OnPropertyChanged(nameof(CanApply)); OnPropertyChanged(nameof(CanReject)); OnPropertyChanged(nameof(CanUndo));
     }
 
+    private async Task NotifyAsync()
+    {
+        if (_stateChanged is not null) await _stateChanged(this);
+    }
+
     [RelayCommand]
     private async Task ApplyAsync()
     {
         if (!CanApply) return;
         SetBusy(true); Error = null;
-        try { await _edits.ApplyAsync(Change); State = ChangeState.Applied; await _afterChange(); }
-        catch (Exception ex) { Error = ex.Message; State = ChangeState.Failed; }
+        try { await _edits.ApplyAsync(Change); State = ChangeState.Applied; await NotifyAsync(); await _afterChange(); }
+        catch (Exception ex) { Error = ex.Message; State = ChangeState.Failed; await NotifyAsync(); }
         finally { SetBusy(false); }
     }
 
     [RelayCommand]
-    private void Reject()
+    private async Task RejectAsync()
     {
-        if (CanReject) State = ChangeState.Rejected;
+        if (!CanReject) return;
+        State = ChangeState.Rejected;
+        await NotifyAsync();
     }
 
     [RelayCommand]
@@ -84,7 +110,7 @@ public sealed partial class ChangeViewModel : ObservableObject
     {
         if (!CanUndo) return;
         SetBusy(true); Error = null;
-        try { await _edits.UndoAsync(Change); State = ChangeState.Undone; await _afterChange(); }
+        try { await _edits.UndoAsync(Change); State = ChangeState.Undone; await NotifyAsync(); await _afterChange(); }
         catch (Exception ex) { Error = ex.Message; }
         finally { SetBusy(false); }
     }
@@ -176,6 +202,30 @@ public sealed partial class MessageViewModel : ObservableObject
     [ObservableProperty] [NotifyPropertyChangedFor(nameof(HasContextNote))] private string? _contextNote;
 
     public bool HasContextNote => !string.IsNullOrEmpty(ContextNote);
+
+    /// <summary>Exact files and excerpts sent to the model for this reply (shown in the "Inspect context" expander).</summary>
+    [ObservableProperty] [NotifyPropertyChangedFor(nameof(HasContextDetails))] private string? _contextDetails;
+    public bool HasContextDetails => !string.IsNullOrEmpty(ContextDetails);
+
+    public void SetContext(ProjectContext c)
+    {
+        ContextNote = c.Files.Count == 0 ? "Project context: overview only" : "Project context: " + string.Join(", ", c.Files);
+        ContextDetails = FormatContext(c);
+    }
+
+    public static string FormatContext(ProjectContext c)
+    {
+        if (c.Details.Count == 0)
+            return "Only the project overview (name, type, file counts) was sent. No file excerpts matched this question.";
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"{c.Details.Count} excerpt(s) were sent to the local model (untrusted data, size-limited; secret files are never included):");
+        foreach (var d in c.Details)
+        {
+            sb.AppendLine().Append(d.File).Append("  (").Append(d.Range).Append(")  — ").AppendLine(d.Reason);
+            sb.AppendLine(d.Text);
+        }
+        return sb.ToString().TrimEnd();
+    }
 
     public ObservableCollection<ChangeViewModel> Changes { get; } = new();
     [ObservableProperty] [NotifyPropertyChangedFor(nameof(HasProblems))] private string? _problems;

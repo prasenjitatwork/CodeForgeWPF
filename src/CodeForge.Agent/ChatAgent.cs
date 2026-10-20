@@ -37,10 +37,16 @@ public sealed class ChatAgent
         "If it is not sufficient, say so instead of guessing.";
 
     public const string EditInstructions =
-        "When the user asks you to change code, propose edits in exactly this format, one block per change:\n" +
+        "You CAN create and modify files in the open project: this application applies your file blocks after the user approves them. " +
+        "Never say you cannot create files and never tell the user to copy code by hand. When the user asks you to create or change files, " +
+        "reply with file blocks only (no long explanations), one block per file or change, in exactly this format:\n" +
         "FILE: relative/path/to/file.ext\n<<<<<<< SEARCH\n(exact existing lines, unique in the file)\n=======\n(replacement lines)\n>>>>>>> REPLACE\n" +
+        "To CREATE a new file leave the SEARCH part empty:\nFILE: css/style.css\n<<<<<<< SEARCH\n=======\n(full file content)\n>>>>>>> REPLACE\n" +
         "Rules: SEARCH must match the existing file exactly and be unique; use an empty SEARCH only to create a new file; " +
-        "never delete or rename files; never edit secret or binary files. These are proposals the user must approve.";
+        "do not wrap blocks in code fences; " +
+        "never edit secret or binary files. To delete or rename a file, only when the user asks, put one line outside any block: " +
+        "'DELETE: relative/path' or 'RENAME: old/path -> new/path'. The user approves each delete or rename individually. " +
+        "These are proposals the user must approve.";
 
     public const string PlanInstructions =
         "The user wants a plan first, not code. Do not write code and do not use edit blocks. " +
@@ -71,7 +77,7 @@ public sealed class ChatAgent
 
     public async IAsyncEnumerable<string> RespondAsync(
         Conversation conversation, string model, [EnumeratorCancellation] CancellationToken ct,
-        Action<IReadOnlyList<string>>? onContext = null, bool planMode = false)
+        Action<ProjectContext>? onContext = null, bool planMode = false)
     {
         string? context = null;
         if (_projects is not null)
@@ -83,7 +89,7 @@ public sealed class ChatAgent
             if (built is not null)
             {
                 context = built.Text;
-                onContext?.Invoke(built.Files);
+                onContext?.Invoke(built);
             }
         }
         var prompt = BuildPrompt(_settings.Current.SystemPrompt, conversation.Messages, context, planMode, await LoadNotesAsync(ct).ConfigureAwait(false));

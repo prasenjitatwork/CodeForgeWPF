@@ -230,7 +230,11 @@
                     </StackPanel>
                 </Expander>
             </Grid>
-            <Button Grid.Row="2" Content="⚙  Settings" Margin="14" Command="{Binding OpenSettingsCommand}"/>
+            <StackPanel Grid.Row="2" Margin="14">
+                <Button Content="❓  Setup guide" Command="{Binding OpenOnboardingCommand}" Margin="0,0,0,6"
+                        AutomationProperties.AutomationId="SetupGuide"/>
+                <Button Content="⚙  Settings" Command="{Binding OpenSettingsCommand}"/>
+            </StackPanel>
         </Grid>
 
         <GridSplitter Grid.Column="1" Width="1" HorizontalAlignment="Center" Background="{StaticResource BorderBrushDark}"/>
@@ -310,6 +314,13 @@
                                         <TextBlock Text="{Binding ContextNote}" FontSize="11" Foreground="{StaticResource MutedBrush}"
                                                    TextWrapping="Wrap" Margin="0,4,0,0"
                                                    Visibility="{Binding HasContextNote, Converter={StaticResource BoolToVis}}"/>
+                                        <Expander Header="🔍 Inspect context" FontSize="11" Margin="0,2,0,0"
+                                                  AutomationProperties.AutomationId="InspectContext"
+                                                  Visibility="{Binding HasContextDetails, Converter={StaticResource BoolToVis}}">
+                                            <TextBox Text="{Binding ContextDetails, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
+                                                     FontFamily="Consolas" FontSize="11" MaxHeight="260"
+                                                     VerticalScrollBarVisibility="Auto" Background="{StaticResource CodeBgBrush}"/>
+                                        </Expander>
                                         <TextBlock Text="{Binding Problems}" FontSize="11" Foreground="{StaticResource WarnBrush}"
                                                    TextWrapping="Wrap" Margin="0,6,0,0"
                                                    Visibility="{Binding HasProblems, Converter={StaticResource BoolToVis}}"/>
@@ -406,6 +417,8 @@
                                                                 <Button Content="Undo" Command="{Binding UndoCommand}" IsEnabled="{Binding CanUndo}"
                                                                         ToolTip="Restore the file to how it was before applying"/>
                                                             </StackPanel>
+                                                            <TextBlock Text="{Binding Note}" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,6,0,0" FontSize="11"
+                                                                       Visibility="{Binding HasNote, Converter={StaticResource BoolToVis}}"/>
                                                             <TextBlock Text="{Binding Error}" Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap" Margin="0,6,0,0"
                                                                        Visibility="{Binding HasError, Converter={StaticResource BoolToVis}}"/>
                                                         </StackPanel>

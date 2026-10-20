@@ -35,6 +35,7 @@ public partial class App : System.Windows.Application
         sc.AddSingleton<IUiServices, UiServices>();
         sc.AddSingleton<MainViewModel>();
         sc.AddTransient<SettingsViewModel>();
+        sc.AddTransient<OnboardingViewModel>();
         _services = sc.BuildServiceProvider();
 
         var vm = _services.GetRequiredService<MainViewModel>();

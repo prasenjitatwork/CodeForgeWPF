@@ -51,7 +51,7 @@ internal static partial class ContextBuilder
             .Take(MaxScannedFiles)
             .ToList();
 
-        var scored = new List<(string Rel, int Score, string[] Lines, List<int> Hits)>();
+        var scored = new List<(string Rel, int Score, string[] Lines, List<int> Hits, string Reason)>();
         var clock = Stopwatch.StartNew();
         foreach (var (file, nameScore) in candidates)
         {
@@ -73,7 +73,39 @@ internal static partial class ContextBuilder
                         if (hits.Count < 40 && (hits.Count == 0 || hits[^1] != i + 1)) hits.Add(i + 1);
                     }
             var score = nameScore + Math.Min(total, 15) * 2 + distinct.Count * 3;
-            if (score >= 3) scored.Add((file.RelativePath, score, lines, hits));
+            if (score >= 3)
+                scored.Add((file.RelativePath, score, lines, hits,
+                    nameScore > 0 ? "file name matches" : "contains " + string.Join(", ", distinct.Take(4))));
+        }
+
+        // Local term index: finds code described with different words (delete/remove, customer/client, ...).
+        var terms = ProjectIndex.ExpandQuery(query);
+        if (terms.Count > 0)
+        {
+            var ranked = s.GetIndex(ct).Search(terms, 8);
+            var max = ranked.Count == 0 ? 1 : ranked[0].Score;
+            foreach (var (path, sc) in ranked)
+            {
+                ct.ThrowIfCancellationRequested();
+                var bonus = (int)Math.Round(sc / max * 14) + 2;
+                var i = scored.FindIndex(x => x.Rel == path);
+                if (i >= 0)
+                {
+                    var e = scored[i];
+                    scored[i] = e with { Score = e.Score + bonus, Reason = e.Reason + "; related terms" };
+                    continue;
+                }
+                var lines = s.ReadAllLinesOrNull(path, MaxScanBytes);
+                if (lines is null) continue;
+                var hits = new List<int>();
+                var matched = new HashSet<string>();
+                for (var n = 0; n < lines.Length && hits.Count < 40; n++)
+                    foreach (var t in ProjectIndex.Tokenize(lines[n]))
+                        if (terms.ContainsKey(t)) { hits.Add(n + 1); matched.Add(t); break; }
+                var via = terms.Where(kv => matched.Contains(kv.Key) && kv.Value.Via is not null).Select(kv => kv.Value.Via!).Distinct().Take(3).ToList();
+                scored.Add((path, bonus, lines, hits,
+                    via.Count > 0 ? "related wording (similar to: " + string.Join(", ", via) + ")" : "index match"));
+            }
         }
 
         var chosen = scored.OrderByDescending(x => x.Score).Take(MaxFiles).ToList();
@@ -81,18 +113,21 @@ internal static partial class ContextBuilder
         sb.AppendLine("Project overview:").AppendLine(summary).AppendLine();
 
         var used = new List<string>();
+        var details = new List<ContextExcerpt>();
         var remaining = TotalBudget;
-        if (chosen.Count > 0) sb.AppendLine("Relevant excerpts (retrieved automatically by keyword match):");
+        if (chosen.Count > 0) sb.AppendLine("Relevant excerpts (retrieved automatically by keyword and local index match):");
         foreach (var c in chosen)
         {
             if (remaining < 300) break;
             var excerpt = Excerpt(c.Lines, c.Hits, Math.Min(PerFileBudget, remaining));
-            sb.Append("=== FILE ").Append(c.Rel.Replace('\\', '/')).Append(" (").Append(excerpt.Range).AppendLine(") ===");
+            var rel = c.Rel.Replace('\\', '/');
+            sb.Append("=== FILE ").Append(rel).Append(" (").Append(excerpt.Range).AppendLine(") ===");
             sb.AppendLine(excerpt.Text).AppendLine("=== END FILE ===");
             remaining -= excerpt.Text.Length;
-            used.Add(c.Rel.Replace('\\', '/'));
+            used.Add(rel);
+            details.Add(new ContextExcerpt(rel, excerpt.Range, c.Reason, excerpt.Text));
         }
-        return new ProjectContext(sb.ToString().TrimEnd(), used);
+        return new ProjectContext(sb.ToString().TrimEnd(), used, details);
     }
 
     private static int NameScore(string rel, IReadOnlyList<string> keywords, IReadOnlyList<string> fileTokens)

@@ -34,6 +34,7 @@ public sealed partial class MainViewModel : ObservableObject
     }
     private readonly ILogger<MainViewModel> _log;
     private readonly IMemoryStore _memory;
+    private readonly IPendingEditStore _pendingEdits;
 
     private Conversation _current = new();
     private CancellationTokenSource? _generationCts;
@@ -42,9 +43,9 @@ public sealed partial class MainViewModel : ObservableObject
     private string _lastUrl = string.Empty;
 
     public MainViewModel(ChatAgent agent, IChatModelClient client, IConversationRepository repo,
-        ISettingsStore settings, IUiServices ui, ProjectViewModel project, IEditService edits, IMemoryStore memory, ILogger<MainViewModel> log)
+        ISettingsStore settings, IUiServices ui, ProjectViewModel project, IEditService edits, IMemoryStore memory, IPendingEditStore pendingEdits, ILogger<MainViewModel> log)
     {
-        _agent = agent; _client = client; _repo = repo; _settings = settings; _ui = ui; _log = log; _edits = edits; _memory = memory;
+        _agent = agent; _client = client; _repo = repo; _settings = settings; _ui = ui; _log = log; _edits = edits; _memory = memory; _pendingEdits = pendingEdits;
         Project = project;
         Project.PromptRequested += async (_, prompt) =>
         {
@@ -113,6 +114,21 @@ public sealed partial class MainViewModel : ObservableObject
         await RefreshConnectionAsync();
         await Project.RestoreLastProjectAsync();
         if (Project.HasProject) ShowProjectTab = true;
+        await MaybeShowOnboardingAsync();
+    }
+
+    private async Task MaybeShowOnboardingAsync()
+    {
+        if (_settings.Current.OnboardingCompleted) return;
+        if (ConnectionState == ConnectionState.Connected && Models.Contains(_settings.Current.Model))
+        {
+            var s = _settings.Current.Clone();
+            s.OnboardingCompleted = true;
+            await _settings.SaveAsync(s);
+            return;
+        }
+        _ui.ShowOnboarding();
+        await RefreshConnectionAsync();
     }
 
     [RelayCommand]
@@ -130,19 +146,19 @@ public sealed partial class MainViewModel : ObservableObject
             SelectedModel = Models.Contains(wanted) ? wanted : Models.FirstOrDefault();
             _suppressModelSave = false;
             ConnectionState = ConnectionState.Connected;
-            if (models.Count == 0)
-                ConnectionText = $"Connected — no models installed. Run: ollama pull {AppSettings.DefaultModel}";
-            else if (!Models.Contains(wanted))
-                ConnectionText = $"Connected — configured model '{wanted}' is not installed (using '{SelectedModel}')";
-            else
-                ConnectionText = $"Connected — {models.Count} model(s)";
+            var report = ConnectionDiagnostics.Evaluate(models, wanted);
+            ConnectionText = report.IsOk ? report.Summary
+                : report.Status == ConnectionStatus.NoModels ? $"Connected — no models installed. {report.Hint}"
+                : $"Connected — model '{wanted}' is not installed (using '{SelectedModel}'). {report.Hint}";
             if (ErrorMessage is not null && ErrorMessage.StartsWith("Cannot reach", StringComparison.Ordinal)) ErrorMessage = null;
         }
         catch (ModelException ex)
         {
             _suppressModelSave = false;
             ConnectionState = ConnectionState.Disconnected;
-            ConnectionText = ex.Message;
+            ConnectionText = ex.Kind == ModelErrorKind.Unavailable || ex.Kind == ModelErrorKind.Timeout
+                ? $"{ex.Message} Open the Setup guide for help."
+                : ex.Message;
         }
         catch (Exception ex)
         {
@@ -204,7 +220,7 @@ public sealed partial class MainViewModel : ObservableObject
         CurrentTitle = conv.Title;
         ErrorMessage = null;
         OnPropertyChanged(nameof(HasMessages));
-        if (conv.Messages.Count > 0) _ = RestorePlansAsync(conv);
+        if (conv.Messages.Count > 0) { _ = RestorePlansAsync(conv); _ = RestoreEditsAsync(conv); }
     }
 
     private Task StartNewConversationCoreAsync()
@@ -228,6 +244,7 @@ public sealed partial class MainViewModel : ObservableObject
         {
             await _repo.DeleteAsync(item.Id);
             try { await _memory.DeletePlansAsync(item.Id); } catch (Exception ex) { _log.LogWarning(ex, "Could not delete saved plans"); }
+            try { await _pendingEdits.DeleteForConversationAsync(item.Id); } catch (Exception ex) { _log.LogWarning(ex, "Could not delete saved edit proposals"); }
             var wasCurrent = item.Id == _current.Id;
             Conversations.Remove(item);
             if (wasCurrent) await StartNewConversationCoreAsync();
@@ -276,7 +293,7 @@ public sealed partial class MainViewModel : ObservableObject
         try
         {
             await foreach (var chunk in _agent.RespondAsync(_current, model, ct,
-                files => assistantVm.ContextNote = files.Count == 0 ? "Project context: overview only" : "Project context: " + string.Join(", ", files),
+                ctx => assistantVm.SetContext(ctx),
                                 planMode))
                                 assistantVm.Append(chunk);
                             if (assistantModel.Content.Length == 0)
@@ -383,29 +400,97 @@ public sealed partial class MainViewModel : ObservableObject
 
     private async Task ProposeEditsAsync(MessageViewModel vm, string content)
     {
-        if (!Project.HasProject || !content.Contains("<<<<<<< SEARCH")) return;
+        if (!Project.HasProject || !(content.Contains("<<<<<<< SEARCH") || HasFileOpLine(content) || content.Contains("FILE:", StringComparison.OrdinalIgnoreCase))) return;
         try
         {
             var prepared = await _edits.PrepareAsync(content);
+            var root = Project.Info?.RootPath;
             foreach (var c in prepared.Changes)
-                vm.Changes.Add(new ChangeViewModel(c, _edits, () => Project.RefreshCommand.ExecuteAsync(null)));
+            {
+                var cvm = MakeChangeVm(c, vm.Model.Id, root);
+                vm.Changes.Add(cvm);
+                if (root is not null) await PersistChangeAsync(cvm, vm.Model.Id, root);
+            }
             if (prepared.Problems.Count > 0) vm.Problems = string.Join("\n", prepared.Problems);
             vm.RaiseChangesChanged();
 
-            var root = Project.Info?.RootPath;
-            if (root is null || vm.Changes.Count == 0) return;
+            // Delete and rename proposals always wait for an explicit click; only edits and new files auto-apply.
+            var auto = vm.Changes.Where(c => !c.RequiresManualApproval && c.State == ChangeState.Pending).ToList();
+            if (root is null || auto.Count == 0) return;
             if (!_writeGranted.Contains(root))
             {
                 if (!_ui.ConfirmWriteAccess(root)) return; // stays Pending; manual Apply still available
                 _writeGranted.Add(root);
             }
-            foreach (var change in vm.Changes) await change.ApplyCommand.ExecuteAsync(null);
+            foreach (var change in auto) await change.ApplyCommand.ExecuteAsync(null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _log.LogWarning(ex, "Could not prepare edits");
             vm.Problems = "Could not prepare edits: " + ex.Message;
         }
+    }
+
+    private static bool HasFileOpLine(string content) =>
+        content.Contains("DELETE:", StringComparison.Ordinal) || content.Contains("RENAME:", StringComparison.Ordinal);
+
+    private ChangeViewModel MakeChangeVm(FileChange c, Guid messageId, string? root) =>
+        new(c, _edits, () => Project.RefreshCommand.ExecuteAsync(null), cvm => root is null ? Task.CompletedTask : PersistChangeAsync(cvm, messageId, root));
+
+    private async Task PersistChangeAsync(ChangeViewModel cvm, Guid messageId, string root)
+    {
+        try
+        {
+            var c = cvm.Change;
+            if (cvm.State is ChangeState.Pending or ChangeState.Applied)
+            {
+                var applied = cvm.State == ChangeState.Applied ? _edits.GetApplied(c.Id) : null;
+                await _pendingEdits.SaveAsync(new StoredEdit(c.Id, _current.Id, messageId, root, c.RelativePath, c.Kind,
+                    c.OriginalContent, c.NewContent, c.BaseHash, c.NewPath, applied));
+            }
+            else await _pendingEdits.DeleteAsync(c.Id);
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "Could not save edit proposal"); }
+    }
+
+    private async Task RestoreEditsAsync(Conversation conv)
+    {
+        try
+        {
+            var stored = await _pendingEdits.ListAsync(conv.Id);
+            if (_current.Id != conv.Id) return;
+            foreach (var se in stored)
+            {
+                var msg = Messages.FirstOrDefault(m => m.Model.Id == se.MessageId);
+                if (msg is null) { await _pendingEdits.DeleteAsync(se.Id); continue; }
+                if (msg.Changes.Any(x => x.Change.Id == se.Id)) continue;
+
+                var raw = new FileChange(se.Id, se.RelativePath, se.Kind, se.OriginalContent, se.NewContent,
+                    Array.Empty<DiffLine>(), 0, 0, se.BaseHash, se.NewPath);
+                var outcome = await _edits.RestoreAsync(raw, se.ProjectRoot, se.Applied);
+                if (_current.Id != conv.Id) return;
+                var cvm = MakeChangeVm(outcome.Change ?? raw, se.MessageId, se.ProjectRoot);
+                switch (outcome.Status)
+                {
+                    case RestoreStatus.Applied:
+                        cvm.MarkRestored(ChangeState.Applied, null);
+                        break;
+                    case RestoreStatus.Stale:
+                        cvm.MarkRestored(ChangeState.Stale, outcome.Reason);
+                        await _pendingEdits.DeleteAsync(se.Id);
+                        break;
+                    case RestoreStatus.OtherProject:
+                        cvm.MarkRestored(ChangeState.Stale, outcome.Reason);
+                        break;
+                    default:
+                        cvm.MarkRestored(ChangeState.Pending, "Restored from a previous session — checked against the current file; nothing was changed.");
+                        break;
+                }
+                msg.Changes.Add(cvm);
+                msg.RaiseChangesChanged();
+            }
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "Could not restore edit proposals"); }
     }
 
     // ChatAgent reads _current.Messages as history; the assistant reply is appended only after streaming ends.
@@ -447,6 +532,13 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (message is null || string.IsNullOrEmpty(message.Content)) return;
         _ui.CopyToClipboard(message.Content);
+    }
+
+    [RelayCommand]
+    private async Task OpenOnboardingAsync()
+    {
+        _ui.ShowOnboarding();
+        await RefreshConnectionAsync();
     }
 
     [RelayCommand]

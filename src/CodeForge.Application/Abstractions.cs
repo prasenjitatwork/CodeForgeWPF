@@ -12,6 +12,7 @@ public sealed class AppSettings
     public int RequestTimeoutSeconds { get; set; } = 300;
     public int ContextWindowTokens { get; set; } = 8192;
     public string? LastProjectPath { get; set; }
+    public bool OnboardingCompleted { get; set; }
     public string SystemPrompt { get; set; } =
         "You are CodeForge, a helpful local coding assistant. Answer concisely and use Markdown code blocks for code.";
 

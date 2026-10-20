@@ -384,7 +384,7 @@ public class ChatAgentProjectTests
         var conv = new Conversation();
         conv.Messages.Add(new ChatMessage { Role = ChatRole.User, Content = "explain a.cs" });
         IReadOnlyList<string>? files = null;
-        await foreach (var _ in agent.RespondAsync(conv, "m", default, f => files = f)) { }
+        await foreach (var _ in agent.RespondAsync(conv, "m", default, f => files = f.Files)) { }
         Assert.Contains("FILE CONTENT HERE", client.Last![0].Content);
         Assert.Equal(new[] { "a.cs" }, files);
     }

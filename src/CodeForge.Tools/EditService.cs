@@ -15,7 +15,7 @@ public sealed class EditService : IEditService
     public const long MaxFileBytes = 1_000_000;
 
     private sealed record Prepared(string Root, FileChange Change);
-    private sealed record Applied(string Root, string RelativePath, EditKind Kind, string AppliedHash, string? BackupPath);
+    private sealed record Applied(string Root, string RelativePath, EditKind Kind, string AppliedHash, string? BackupPath, string? OldRelativePath = null);
     private sealed record DiskFile(string Text, string Hash, bool Bom, bool Crlf);
 
     private readonly ProjectWorkspace _workspace;
@@ -125,6 +125,42 @@ public sealed class EditService : IEditService
             catch (ProjectException ex) { problems.Add($"{group.Key}: {ex.Message}"); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { problems.Add($"{group.Key}: {ex.Message}"); }
         }
+
+        var (ops, opProblems) = EditParser.ParseOps(text);
+        problems.AddRange(opProblems);
+        foreach (var op in ops)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var (full, rel) = ResolveWritable(s, op.Path);
+                var relFwd = rel.Replace('\\', '/');
+                if (changes.Any(c => string.Equals(c.RelativePath, relFwd, StringComparison.OrdinalIgnoreCase)))
+                    throw new ProjectException("This file is already part of another change in the same reply; propose one operation per file.");
+                var disk = ReadDisk(full) ?? throw new ProjectException("The file does not exist.");
+
+                FileChange change;
+                if (op.Kind == EditOpKind.Delete)
+                {
+                    var (diff, added, removed) = DiffEngine.Diff(disk.Text, "");
+                    change = new FileChange(Guid.NewGuid(), relFwd, EditKind.Delete, disk.Text, "", diff, added, removed, disk.Hash);
+                }
+                else
+                {
+                    var (fullTo, relTo) = ResolveWritable(s, op.NewPath!);
+                    if (string.Equals(rel, relTo, StringComparison.OrdinalIgnoreCase)) throw new ProjectException("The new name is the same as the old one.");
+                    if (File.Exists(fullTo) || Directory.Exists(fullTo)) throw new ProjectException($"'{relTo}' already exists; refusing to overwrite.");
+                    var relToFwd = relTo.Replace('\\', '/');
+                    var diff = new List<DiffLine> { new(DiffKind.Context, $"{relFwd}  →  {relToFwd}", null, null) };
+                    change = new FileChange(Guid.NewGuid(), relFwd, EditKind.Rename, disk.Text, disk.Text, diff, 0, 0, disk.Hash, relToFwd);
+                }
+                _prepared[change.Id] = new Prepared(s.Guard.Root, change);
+                changes.Add(change);
+            }
+            catch (PathAccessException ex) { problems.Add($"{op.Path}: access denied — {ex.Message}"); }
+            catch (ProjectException ex) { problems.Add($"{op.Path}: {ex.Message}"); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { problems.Add($"{op.Path}: {ex.Message}"); }
+        }
         return new PreparedEdits(changes, problems);
     }
 
@@ -154,6 +190,112 @@ public sealed class EditService : IEditService
         return string.Join('\n', result);
     }
 
+    private string NewBackupPath(Guid id, string rel) =>
+        Path.Combine(_backupRoot, DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + id.ToString("N")[..8], rel);
+
+    private bool IsInsideBackupRoot(string path)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(_backupRoot)) + Path.DirectorySeparatorChar;
+        return Path.GetFullPath(path).StartsWith(root, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private byte[] ReadBackup(Applied a)
+    {
+        if (a.BackupPath is null || !IsInsideBackupRoot(a.BackupPath) || !File.Exists(a.BackupPath))
+            throw new ProjectException("The backup for this change is missing; cannot restore it.");
+        var bytes = File.ReadAllBytes(a.BackupPath);
+        if (Hash(bytes) != a.AppliedHash && a.Kind == EditKind.Delete)
+            throw new ProjectException("The backup does not match the deleted file; refusing to restore it.");
+        return bytes;
+    }
+
+    public AppliedInfo? GetApplied(Guid id) =>
+        _applied.TryGetValue(id, out var a) ? new AppliedInfo(a.RelativePath, a.Kind, a.AppliedHash, a.BackupPath, a.OldRelativePath) : null;
+
+    public Task<RestoreOutcome> RestoreAsync(FileChange change, string projectRoot, AppliedInfo? applied, CancellationToken ct = default) =>
+        Task.Run(() => Restore(change, projectRoot, applied), ct);
+
+    private RestoreOutcome Restore(FileChange c, string projectRoot, AppliedInfo? ap)
+    {
+        var s = _workspace.Session;
+        if (s is null || !string.Equals(Path.TrimEndingDirectorySeparator(s.Guard.Root), Path.TrimEndingDirectorySeparator(projectRoot), StringComparison.OrdinalIgnoreCase))
+            return new RestoreOutcome(RestoreStatus.OtherProject, "Open the project this proposal belongs to (" + projectRoot + ") to review it.");
+        try
+        {
+            if (Encoding.UTF8.GetByteCount(c.OriginalContent) > MaxFileBytes || Encoding.UTF8.GetByteCount(c.NewContent) > MaxFileBytes)
+                return new RestoreOutcome(RestoreStatus.Stale, "The saved proposal is larger than the edit limit.");
+            if (c.Kind is EditKind.Modify or EditKind.Delete or EditKind.Rename && string.IsNullOrEmpty(c.BaseHash))
+                return new RestoreOutcome(RestoreStatus.Stale, "The saved proposal has no file fingerprint.");
+
+            var (full, rel) = ResolveWritable(s, c.RelativePath);
+            var relFwd = rel.Replace('\\', '/');
+            string? relToFwd = null;
+            string? fullTo = null;
+            if (c.Kind == EditKind.Rename)
+            {
+                var (ft, rt) = ResolveWritable(s, c.NewPath ?? throw new ProjectException("The new path is missing."));
+                (fullTo, relToFwd) = (ft, rt.Replace('\\', '/'));
+            }
+
+            FileChange rebuilt;
+            switch (c.Kind)
+            {
+                case EditKind.Rename:
+                    rebuilt = c with { RelativePath = relFwd, NewPath = relToFwd, Diff = new List<DiffLine> { new(DiffKind.Context, $"{relFwd}  →  {relToFwd}", null, null) }, Added = 0, Removed = 0 };
+                    break;
+                default:
+                    var (diff, added, removed) = DiffEngine.Diff(c.OriginalContent, c.NewContent);
+                    rebuilt = c with { RelativePath = relFwd, Diff = diff, Added = added, Removed = removed };
+                    break;
+            }
+
+            if (ap is null)
+            {
+                switch (c.Kind)
+                {
+                    case EditKind.Create:
+                        if (File.Exists(full) || Directory.Exists(full)) return new RestoreOutcome(RestoreStatus.Stale, "The file now exists, so this new-file proposal is out of date.");
+                        break;
+                    default:
+                        var disk = ReadDisk(full);
+                        if (disk is null) return new RestoreOutcome(RestoreStatus.Stale, "The file no longer exists.");
+                        if (disk.Hash != c.BaseHash) return new RestoreOutcome(RestoreStatus.Stale, "The file changed since this was proposed.");
+                        if (c.Kind == EditKind.Rename && (File.Exists(fullTo!) || Directory.Exists(fullTo!)))
+                            return new RestoreOutcome(RestoreStatus.Stale, $"'{relToFwd}' now exists.");
+                        break;
+                }
+                _prepared[c.Id] = new Prepared(s.Guard.Root, rebuilt);
+                return new RestoreOutcome(RestoreStatus.Pending, null, rebuilt);
+            }
+
+            var (aFull, aRel) = ResolveWritable(s, ap.RelativePath);
+            if (ap.Kind != c.Kind) return new RestoreOutcome(RestoreStatus.Stale, "The saved record is inconsistent.");
+            var applied = new Applied(s.Guard.Root, aRel, ap.Kind, ap.AppliedHash, ap.BackupPath, ap.OldRelativePath);
+            if (ap.Kind is EditKind.Modify or EditKind.Delete && (ap.BackupPath is null || !IsInsideBackupRoot(ap.BackupPath) || !File.Exists(ap.BackupPath)))
+                return new RestoreOutcome(RestoreStatus.Stale, "The backup file is missing, so this change can no longer be undone.");
+            if (ap.Kind == EditKind.Delete)
+            {
+                if (File.Exists(aFull) || Directory.Exists(aFull)) return new RestoreOutcome(RestoreStatus.Stale, "Something now exists at the deleted path.");
+            }
+            else
+            {
+                if (!File.Exists(aFull) || Hash(File.ReadAllBytes(aFull)) != ap.AppliedHash)
+                    return new RestoreOutcome(RestoreStatus.Stale, "The file was modified after the change was applied, so it can no longer be undone.");
+                if (ap.Kind == EditKind.Rename)
+                {
+                    var (fFrom, _) = ResolveWritable(s, ap.OldRelativePath ?? throw new ProjectException("The original path is missing."));
+                    if (File.Exists(fFrom) || Directory.Exists(fFrom)) return new RestoreOutcome(RestoreStatus.Stale, "Something now exists at the original path.");
+                }
+            }
+            _prepared[c.Id] = new Prepared(s.Guard.Root, rebuilt);
+            _applied[c.Id] = applied;
+            return new RestoreOutcome(RestoreStatus.Applied, null, rebuilt);
+        }
+        catch (PathAccessException ex) { return new RestoreOutcome(RestoreStatus.Stale, "Access denied: " + ex.Message); }
+        catch (ProjectException ex) { return new RestoreOutcome(RestoreStatus.Stale, ex.Message); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return new RestoreOutcome(RestoreStatus.Stale, ex.Message); }
+    }
+
     public async Task ApplyAsync(FileChange change, CancellationToken ct = default)
     {
         if (!_prepared.TryGetValue(change.Id, out var prepared))
@@ -175,6 +317,32 @@ public sealed class EditService : IEditService
                     var disk = ReadDisk(full);
                     string? backup = null;
                     byte[] bytes;
+                    if (c.Kind == EditKind.Delete || c.Kind == EditKind.Rename)
+                    {
+                        if (disk is null) throw new ProjectException("The file no longer exists.");
+                        if (disk.Hash != c.BaseHash) throw new ProjectException("The file changed on disk since the proposal. Ask for the edit again.");
+                        string? fullTo = null, relTo = null;
+                        if (c.Kind == EditKind.Rename)
+                        {
+                            (fullTo, relTo) = ResolveWritable(s, c.NewPath ?? throw new ProjectException("The new path is missing."));
+                            if (File.Exists(fullTo) || Directory.Exists(fullTo)) throw new ProjectException($"'{relTo}' now exists; refusing to overwrite it.");
+                        }
+                        backup = NewBackupPath(c.Id, rel);
+                        Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
+                        File.Copy(full, backup, overwrite: false);
+                        if (c.Kind == EditKind.Delete)
+                        {
+                            File.Delete(full);
+                            _applied[c.Id] = new Applied(s.Guard.Root, rel, EditKind.Delete, c.BaseHash!, backup);
+                        }
+                        else
+                        {
+                            Directory.CreateDirectory(Path.GetDirectoryName(fullTo!)!);
+                            File.Move(full, fullTo!);
+                            _applied[c.Id] = new Applied(s.Guard.Root, relTo!, EditKind.Rename, c.BaseHash!, backup, rel);
+                        }
+                        return;
+                    }
                     if (c.Kind == EditKind.Create)
                     {
                         if (disk is not null || File.Exists(full)) throw new ProjectException("The file now exists; refusing to overwrite it.");
@@ -184,7 +352,7 @@ public sealed class EditService : IEditService
                     {
                         if (disk is null) throw new ProjectException("The file no longer exists.");
                         if (disk.Hash != c.BaseHash) throw new ProjectException("The file changed on disk since the proposal. Ask for the edit again.");
-                        backup = Path.Combine(_backupRoot, DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + c.Id.ToString("N")[..8], rel);
+                        backup = NewBackupPath(c.Id, rel);
                         Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
                         File.Copy(full, backup, overwrite: false);
                         bytes = Encode(c.NewContent, disk.Bom, disk.Crlf);
@@ -219,10 +387,28 @@ public sealed class EditService : IEditService
                 try
                 {
                     var (full, _) = ResolveWritable(s, a.RelativePath);
-                    if (!File.Exists(full) || Hash(File.ReadAllBytes(full)) != a.AppliedHash)
-                        throw new ProjectException("The file was modified after the change was applied; refusing to undo over newer work.");
-                    if (a.Kind == EditKind.Create) File.Delete(full);
-                    else WriteAtomic(full, File.ReadAllBytes(a.BackupPath!));
+                    if (a.Kind == EditKind.Delete)
+                    {
+                        if (File.Exists(full) || Directory.Exists(full)) throw new ProjectException("Something now exists at the deleted path; refusing to overwrite it.");
+                        var backupBytes = ReadBackup(a);
+                        WriteAtomic(full, backupBytes);
+                    }
+                    else if (a.Kind == EditKind.Rename)
+                    {
+                        var (fullFrom, _) = ResolveWritable(s, a.OldRelativePath ?? throw new ProjectException("The original path is missing."));
+                        if (!File.Exists(full) || Hash(File.ReadAllBytes(full)) != a.AppliedHash)
+                            throw new ProjectException("The renamed file was modified or moved after the change; refusing to undo.");
+                        if (File.Exists(fullFrom) || Directory.Exists(fullFrom)) throw new ProjectException("Something now exists at the original path; refusing to overwrite it.");
+                        Directory.CreateDirectory(Path.GetDirectoryName(fullFrom)!);
+                        File.Move(full, fullFrom);
+                    }
+                    else
+                    {
+                        if (!File.Exists(full) || Hash(File.ReadAllBytes(full)) != a.AppliedHash)
+                            throw new ProjectException("The file was modified after the change was applied; refusing to undo over newer work.");
+                        if (a.Kind == EditKind.Create) File.Delete(full);
+                        else WriteAtomic(full, File.ReadAllBytes(a.BackupPath!));
+                    }
                     _applied.TryRemove(change.Id, out _);
                 }
                 catch (PathAccessException ex) { throw new ProjectException("Access denied: " + ex.Message, ex); }

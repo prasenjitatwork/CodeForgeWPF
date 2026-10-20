@@ -82,15 +82,35 @@
 - App smoke test (exe driven through UI Automation, isolated data dir): last project auto-reopened ("CodeForgeWPF (Solution)", 48 files, tree shown); **Explain project** sent a question; Ollama streamed a coherent answer about CodeForge Studio; the message showed "Project context: MainViewModel.cs, ProjectViewModel.cs, DEVELOPMENT_PROGRESS.md, App.xaml.cs"; header checkbox shown.
 - Not manually exercised in the live UI: Open folder/file dialogs, search box, Outline button (covered by unit tests at the workspace level only).
 
-## Known limitations
+## Improvement pass (post Phase 6) - what changed
+1. **Verification:** `scripts\verify.ps1` (restore, Release build, both test projects; writes `artifacts\verification.txt`; non-zero exit on failure) and `.github\workflows\ci.yml` (windows-latest, .NET 10). See "Latest verification" below.
+2. **ViewModel tests:** new project `tests\CodeForge.Studio.Tests` (net10.0-windows, xUnit) using real view models and real local services in temp folders; only Ollama (`FakeModelClient`) and dialogs (`FakeUi`) are faked. No live Ollama needed. Covers project open/close/restore/selection, preview (secrets blocked), search (debounce, short query, secrets), plan controls (Run/Done/Skip/Run next/progress/restore), `/remember`, edit cards (permission, auto-apply, undo, reject, stale, delete/rename manual approval, restore after restart), onboarding/connection feedback, permission text and the context inspector text.
+3. **Run-commands prompt:** `Services\PermissionText.cs` - plain-language warning that build/test files can run project-controlled code, exact folder and command, fixed command list; default button No. Allow-list and folder scoping in `BuildService` are unchanged.
+4. **Retrieval:** `Tools\ProjectIndex.cs` - lazy in-memory BM25 index over identifier sub-words with light stemming and a small synonym map (e.g. remove/delete, customer/client), built through `ProjectSession` so secret/excluded files never enter it (caps: 1500 files, 300 KB each, 4 s). `ContextBuilder` merges index hits with the existing keyword scoring; budgets unchanged (12000 total, 3500/file, 4 files). New **Inspect context** expander under each project reply lists exactly which files/line ranges were sent and why. Tests: `RetrievalTests.cs`.
+5. **Edit recovery and file operations:** pending/applied proposals are stored in `edits.db` (`SqlitePendingEditStore`) and restored when a conversation is reopened. `EditService.Restore` revalidates the project root, path policy, size and file hash, and that backups sit inside the backup root; changed files show "Out of date" and cannot be applied; records for another project are kept but not shown. Restored proposals never auto-apply. `DELETE: path` and `RENAME: old -> new` proposals use the same path guards, hash check and backup/undo; they are **never** auto-applied, even after folder permission. Tests: `EditRecoveryTests.cs`, `EditCardFlowTests.cs`.
+6. **Onboarding:** `OnboardingViewModel`/`OnboardingWindow` (install Ollama link, `ollama pull <model>`, Check connection). Shown on first run only if Ollama or the model is not ready (otherwise silently marked complete via `AppSettings.OnboardingCompleted`); reopen any time with the sidebar **Setup guide** button. `Application\ConnectionDiagnostics.cs` distinguishes Ollama unreachable, no models, selected model missing (with the pull command and installed models), and timeout. Only the local Ollama URL is contacted; the one link opens ollama.com/download in the browser on click.
+
+## Latest verification (most recent run of `scripts\verify.ps1` - separate from the historical results below)
+- **Date:** 2026-10-20 11:17 +05:30 (after adding the new-file fallback parser: `FILE:` + fenced code or `<<>>` markers is accepted as a new-file proposal only; existing files are never overwritten by it, and the prompt now tells the model it can create files). **Environment:** Windows 10.0.26300, .NET SDK 10.0.402 (Windows desktop workload available).
+- **Command:** `powershell -ExecutionPolicy Bypass -File scripts\verify.ps1` (restore; `dotnet build CodeForgeStudio.sln -c Release`; `dotnet test` for each test project).
+- **Result: PASSED** - build 0 warnings / 0 errors; `CodeForge.Tests` 191 passed, 0 failed; `CodeForge.Studio.Tests` 51 passed, 0 failed. No failures in this run.
+- **Not verified:** the GitHub Actions workflow has **not** been executed (it has not been pushed). A launch smoke test of the Release exe (isolated data dir, Ollama running with the model) showed the window opening, staying alive, and the guide being skipped and marked complete; the onboarding window, Inspect context expander, restored edit cards, and the delete/rename cards were **not** inspected live.
+
+## UI flows that cannot be tested automatically (and why)
+- Real `MessageBox` prompts (folder write permission, run-commands) - modal system dialogs; tests assert the prompt text and call counts through `IUiServices` fakes.
+- Folder/file pickers - OS dialogs; tests fake `PickFolder`.
+- WPF rendering/layout, bindings, expanders, scrolling, theme - the test project loads view models only, not windows; verified by hand only.
+- Streaming from a real Ollama model and answer quality - non-deterministic and needs a running model; `LiveOllamaTests` stays the only integration test.
+- Opening ollama.com in the browser from the guide.
+
 - Build/test: only dotnet and Flutter; Flutter path is untested live (no Flutter SDK checked); xUnit/MSBuild-style output parsing only; cancel and timeout unit tests are weak because commands are fixed (live Stop not clicked); output is shown only in the sidebar box; no automatic build after an edit.
-- Edits: no delete/rename; UTF-8 text only; â‰¤1 MB files; pending proposals are not persisted across restarts; Undo works only in the same session; a 7B model may not follow the SEARCH/REPLACE format exactly (such cases show as problems, not changes). Edits from earlier chat messages can still be applied if the file is unchanged.
-- Retrieval is keyword-based (no embeddings/persistent index; not built in Phase 6); a question using different words than the code may miss the relevant file.
+- Edits: delete/rename are supported but need an explicit click each time; UTF-8 text only; â‰¤1 MB files; pending proposals are restored after restart only when the file is unchanged; Undo after restart works only if the backup is still intact and the file is unchanged; a 7B model may not follow the SEARCH/REPLACE format exactly (such cases show as problems, not changes). Edits from earlier chat messages can still be applied if the file is unchanged.
+- Retrieval is keyword + BM25 with a small built-in synonym map (no embeddings, in-memory index); wording far from the code can still miss files - use Inspect context to see what was sent.
 - Outline is regex-based (C# and Dart only), not a real parser.
 - Index is in-memory and rebuilt on open/Refresh; no file watcher.
 - A link whose intermediate directories are links is not fully resolved; links are skipped during enumeration.
 - 7B local model answers can be partly inaccurate; context is limited by `num_ctx`.
-- No ViewModel/UI automated tests.
+- Windows/dialog rendering is not automatically tested (see "UI flows that cannot be tested automatically"). Write and run permissions are per session (in memory).
 
 ## Decisions affecting future work
 - All file access goes through `ProjectSession`/`ProjectPathGuard`; all writes go only through `EditService` (approval, stale-check, backup). Later phases (e.g., build/test) must not bypass it.

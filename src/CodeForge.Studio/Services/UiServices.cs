@@ -13,6 +13,7 @@ public interface IUiServices
     string? PickProjectFile();
     bool ConfirmWriteAccess(string folder);
     bool ConfirmRunCommands(string folder, string exampleCommand);
+    void ShowOnboarding();
 }
 
 public sealed class UiServices : IUiServices
@@ -51,10 +52,16 @@ public sealed class UiServices : IUiServices
 
     public bool ConfirmRunCommands(string folder, string exampleCommand) =>
         MessageBox.Show(System.Windows.Application.Current.MainWindow,
-            $"Allow CodeForge to run build and test commands in this folder?\n\n{folder}\n\nFirst command: {exampleCommand}\n\n" +
-            "Building or testing runs the project's own code and build scripts on this computer. Only fixed commands " +
-            "(dotnet build/test, flutter analyze/test) are ever run, and you start each one yourself.",
-            "Run commands permission", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes;
+            PermissionText.RunCommands(folder, exampleCommand),
+            "Run commands permission", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) == MessageBoxResult.Yes;
+
+    public void ShowOnboarding()
+    {
+        var vm = _sp.GetRequiredService<OnboardingViewModel>();
+        var win = new OnboardingWindow { DataContext = vm, Owner = System.Windows.Application.Current.MainWindow };
+        vm.CloseRequested += (_, _) => win.Close();
+        win.ShowDialog();
+    }
 
     public void ShowSettings()
     {

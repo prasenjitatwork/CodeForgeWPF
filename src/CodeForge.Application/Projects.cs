@@ -17,7 +17,13 @@ public sealed record TextMatch(string RelativePath, int Line, string Snippet);
 
 public sealed record Declaration(string Kind, string Name, int Line);
 
-public sealed record ProjectContext(string Text, IReadOnlyList<string> Files);
+/// <summary>One excerpt sent to the model: which file, which lines, why it was picked, and the exact text.</summary>
+public sealed record ContextExcerpt(string File, string Range, string Reason, string Text);
+
+public sealed record ProjectContext(string Text, IReadOnlyList<string> Files, IReadOnlyList<ContextExcerpt>? Excerpts = null)
+{
+    public IReadOnlyList<ContextExcerpt> Details => Excerpts ?? Array.Empty<ContextExcerpt>();
+}
 
 /// <summary>Expected, user-presentable failure (bad path, access denied by policy, etc.).</summary>
 public sealed class ProjectException : Exception
